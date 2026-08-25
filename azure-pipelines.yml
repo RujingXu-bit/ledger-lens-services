@@ -233,7 +233,15 @@ stages:
   # ---------------------------------------------------------------------------
   - stage: SmokeTest
     displayName: Prove the deployment works
-    dependsOn: Deploy
+    # Verify is listed even though Deploy already depends on it, and the reason
+    # is not ordering. `stageDependencies` can only read stages this one
+    # declares a dependency on, so with `dependsOn: Deploy` alone the shortSha
+    # expression below silently resolved to an empty string. The first run
+    # failed with "deployed image is not this build" while printing an image
+    # tag that was, in fact, exactly this build - a comparison against nothing.
+    dependsOn:
+      - Deploy
+      - Verify
     condition: succeeded()
     variables:
       shortSha: $[ stageDependencies.Verify.Maven.outputs['meta.shortSha'] ]
@@ -261,18 +269,24 @@ stages:
                 curl -sf --max-time 60 "$URL/actuator/health/readiness" >/dev/null && break
                 sleep 10
               done
-              curl -sf --max-time 60 "$URL/actuator/health/readiness"
+              curl -sf --max-time 60 "$URL/actuator/health/readiness"; echo
 
               # The deployed build must be the build this pipeline produced.
               # Without this check a failed rollout looks identical to a
               # successful one: the old revision answers happily.
-              echo "verifying the running revision came from this commit"
+              # Guard the guard: if the expected tag were ever empty again, the
+              # comparison below would be meaningless, so fail loudly instead.
+              EXPECTED="0.1.0-$(shortSha)"
+              case "$EXPECTED" in
+                0.1.0-) echo "the expected image tag resolved to nothing - the shortSha variable is not reaching this stage" >&2; exit 1 ;;
+              esac
+              echo "verifying the running revision came from this commit (expecting $EXPECTED)"
               RUNNING=$(az containerapp show --name analytics-service \
                 --resource-group $(resourceGroup) \
                 --query "properties.template.containers[0].image" -o tsv)
               echo "running image: $RUNNING"
               case "$RUNNING" in
-                *:0.1.0-$(shortSha)) echo "matches this build" ;;
+                *:"$EXPECTED") echo "matches this build" ;;
                 *) echo "deployed image is not this build" >&2; exit 1 ;;
               esac
 
