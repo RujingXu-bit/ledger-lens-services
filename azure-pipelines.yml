@@ -53,20 +53,28 @@ pr:
 # The trade-off, stated plainly: a self-hosted agent only runs while the machine
 # hosting it is on. Flip this parameter once hosted parallelism is available.
 parameters:
-  - name: useMicrosoftHostedAgent
-    displayName: Run on Microsoft-hosted agents
-    type: boolean
-    default: false
-  - name: selfHostedPool
-    displayName: Self-hosted agent pool name
+  - name: agentPool
+    displayName: Self-hosted agent pool
     type: string
     default: Default
 
+# A plain pool name, not a conditional. The first version of this file selected
+# between a hosted image and a self-hosted pool with a ${{ if }} block, and
+# Azure Pipelines rejects template expressions in the root `pool` context:
+#
+#   A template expression is not allowed in this context
+#
+# Supporting both agent types was worth less than a file that runs. To move to
+# Microsoft-hosted agents, replace this block with:
+#
+#   pool:
+#     vmImage: ubuntu-latest
+#
+# and add `JAVA_HOME: $(JAVA_HOME_21_X64)` to the variables below - hosted
+# Ubuntu images expose each installed JDK that way, and pinning it beats hoping
+# the default happens to be 21.
 pool:
-  ${{ if parameters.useMicrosoftHostedAgent }}:
-    vmImage: ubuntu-latest
-  ${{ else }}:
-    name: ${{ parameters.selfHostedPool }}
+  name: ${{ parameters.agentPool }}
 
 variables:
   # Set once, used by every stage. The registry and resource group are the ones
@@ -76,14 +84,6 @@ variables:
     value: acrledgerlens79829b.azurecr.io
   - name: resourceGroup
     value: rg-ledgerlens
-  # Microsoft-hosted Ubuntu agents expose every installed JDK under a variable
-  # like this one. Pinning it beats hoping the default happens to be 21 - a
-  # silent JDK 17 is a confusing failure and a silent JDK 25 is a worse one. On
-  # a self-hosted agent the machine's own JAVA_HOME is already correct, so this
-  # is only set for hosted runs.
-  - ${{ if parameters.useMicrosoftHostedAgent }}:
-      - name: JAVA_HOME
-        value: $(JAVA_HOME_21_X64)
 
 stages:
 
