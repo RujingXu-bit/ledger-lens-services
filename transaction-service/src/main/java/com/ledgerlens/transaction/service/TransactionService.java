@@ -1,5 +1,6 @@
 package com.ledgerlens.transaction.service;
 
+import com.ledgerlens.transaction.domain.Holding;
 import com.ledgerlens.transaction.domain.Transaction;
 import com.ledgerlens.transaction.domain.TransactionNotFoundException;
 import com.ledgerlens.transaction.domain.TransactionRepository;
@@ -67,5 +68,13 @@ public class TransactionService {
         Instant upperBound = to == null ? OPEN_ENDED : to;
         return repository.findByPortfolioIdAndExecutedAtBetweenOrderByExecutedAtAscIdAsc(
                 portfolioId, lowerBound, upperBound, pageable);
+    }
+
+    /**
+     * Positions as at {@code asOf}, derived from the ledger rather than stored.
+     * A null {@code asOf} means now.
+     */
+    public List<Holding> findHoldings(UUID portfolioId, Instant asOf) {
+        return repository.findHoldingsAsOf(portfolioId, asOf == null ? Instant.now() : asOf);
     }
 }

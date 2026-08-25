@@ -49,3 +49,9 @@ management:
       probes:
         enabled: true
       show-details: when-authorized
+  info:
+    # Surfaces the build version and Git-free build timestamp at /actuator/info.
+    build:
+      enabled: true
+    java:
+      enabled: true

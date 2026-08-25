@@ -67,6 +67,17 @@
                 <plugin>
                     <groupId>org.springframework.boot</groupId>
                     <artifactId>spring-boot-maven-plugin</artifactId>
+                    <executions>
+                        <execution>
+                            <!-- Writes META-INF/build-info.properties into the jar, which
+                                 Actuator serves at /actuator/info. In week 2 that is how you
+                                 answer "which build is actually running in this pod?" without
+                                 shelling into it. -->
+                            <goals>
+                                <goal>build-info</goal>
+                            </goals>
+                        </execution>
+                    </executions>
                 </plugin>
             </plugins>
         </pluginManagement>

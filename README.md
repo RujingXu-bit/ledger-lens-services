@@ -92,6 +92,14 @@ docker compose up -d          # Postgres on host port 5433
 ./mvnw -pl analytics-service  spring-boot:run
 ```
 
+Load a demo portfolio — 180 trading days of prices for two funds, an opening
+position, monthly contributions, a sale and a dividend. Deterministic, so the
+analytics figures computed from it are reproducible:
+
+```bash
+python3 scripts/seed-demo-data.py
+```
+
 ```bash
 curl localhost:8081/actuator/health/readiness
 curl localhost:8082/actuator/health/liveness
@@ -108,6 +116,9 @@ wedged, restart it", readiness answers "may this instance take traffic yet".
 | `POST` | `/api/v1/transactions` | Record a transaction. `201` + `Location`. |
 | `GET` | `/api/v1/transactions/{id}` | One transaction, or `404`. |
 | `GET` | `/api/v1/transactions?portfolioId=&from=&to=&page=&size=` | A portfolio's ledger, oldest first. `portfolioId` is required. |
+| `GET` | `/api/v1/portfolios/{id}/holdings?asOf=` | Positions, derived from the ledger. No holdings table exists. |
+| `PUT` | `/api/v1/prices` | Bulk load closing prices. Idempotent. |
+| `GET` | `/api/v1/prices?symbols=&from=&to=` | Closing prices for several symbols over a date range. |
 
 No `PUT`, no `DELETE`. The ledger is append-only: a mistaken entry is corrected
 with a reversing transaction, the way double-entry bookkeeping has always done
@@ -115,6 +126,47 @@ it. That is also what lets every analytics figure be recomputed from scratch.
 
 Types modelled: `BUY`, `SELL`, `DIVIDEND`, `DEPOSIT`, `WITHDRAWAL`. Enough to
 make the analytics real; corporate actions, FX and short positions are not.
+
+### Holdings are derived, never stored
+
+There is no `holdings` table. A position is a fold over the transaction log —
+buys added, sells subtracted — computed by a `GROUP BY` on request, and
+answerable as at any past instant via `?asOf=`.
+
+A maintained holdings table would mean writing two places on every transaction.
+Any failure between the two writes, or any insert that bypasses the service,
+leaves them permanently inconsistent and nothing ever notices. Deriving has one
+source of truth and cannot disagree with itself.
+
+The cost is a scan of one portfolio's transactions, which the
+`(portfolio_id, executed_at)` index makes cheap at this size. When it stops
+being cheap the answer is a materialised view or an incremental snapshot — a
+decision to take with measurements, not in advance of them.
+
+### Prices are reference data, and behave differently on purpose
+
+| | `transactions` | `daily_prices` |
+|---|---|---|
+| Nature | events that happened | facts about the world |
+| Writes | append-only, `POST`, not idempotent | upsert, `PUT`, idempotent |
+| Corrections | a reversing entry | overwrite the row |
+| Key | surrogate UUID | natural `(symbol, price_date)` |
+
+`PUT` because a price load gets retried, replayed, and run twice by a nervous
+operator; running it twice must leave the same state. `POST /transactions` is
+deliberately the opposite — posting the same trade twice means it happened
+twice.
+
+The bulk write drops out of JPA into `INSERT ... ON CONFLICT DO UPDATE`.
+`saveAll` on an entity with an assigned key issues a SELECT per row to choose
+between insert and update, so a year of prices for ten symbols would be ~2,500
+round trips before a single write. Set-based work belongs in SQL; keeping it
+behind `DailyPriceBatchWriter` means nothing else in the service notices.
+
+**Honest caveat:** market data is arguably its own bounded context and in a
+larger system would be its own service fed by a vendor feed. Folding it into
+transaction-service is a deliberate scope decision for a two-week project, not
+a claim that it belongs here.
 
 ### Errors
 

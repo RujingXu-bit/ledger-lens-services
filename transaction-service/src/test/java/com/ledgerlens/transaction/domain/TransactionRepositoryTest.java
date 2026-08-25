@@ -111,6 +111,50 @@ class TransactionRepositoryTest {
                 .hasMessageContaining("transactions_shape");
     }
 
+    @Test
+    void holdingsAreTheNetOfBuysAndSells() {
+        repository.save(trade(PORTFOLIO, TransactionType.BUY, "IWDA", "10", "2026-01-05T00:00:00Z"));
+        repository.save(trade(PORTFOLIO, TransactionType.BUY, "IWDA", "5", "2026-01-10T00:00:00Z"));
+        repository.save(trade(PORTFOLIO, TransactionType.SELL, "IWDA", "4", "2026-01-20T00:00:00Z"));
+        repository.save(trade(PORTFOLIO, TransactionType.BUY, "VWCE", "2", "2026-01-12T00:00:00Z"));
+        // Cash movements must not appear as positions.
+        repository.save(cashDeposit(PORTFOLIO, "2026-01-01T00:00:00Z", "5000"));
+        repository.flush();
+
+        List<Holding> holdings = repository.findHoldingsAsOf(PORTFOLIO, Instant.parse("2026-12-31T00:00:00Z"));
+
+        assertThat(holdings).extracting(Holding::symbol).containsExactly("IWDA", "VWCE");
+        assertThat(holdings.get(0).quantity()).isEqualByComparingTo("11");
+        assertThat(holdings.get(1).quantity()).isEqualByComparingTo("2");
+    }
+
+    @Test
+    void aFullyClosedPositionIsNotAHolding() {
+        repository.save(trade(PORTFOLIO, TransactionType.BUY, "ACME", "10", "2026-01-05T00:00:00Z"));
+        repository.save(trade(PORTFOLIO, TransactionType.SELL, "ACME", "10", "2026-01-06T00:00:00Z"));
+        repository.flush();
+
+        assertThat(repository.findHoldingsAsOf(PORTFOLIO, Instant.parse("2026-12-31T00:00:00Z"))).isEmpty();
+    }
+
+    @Test
+    void holdingsAreAsAtAPointInTimeAndIgnoreLaterTrades() {
+        repository.save(trade(PORTFOLIO, TransactionType.BUY, "IWDA", "10", "2026-01-05T00:00:00Z"));
+        repository.save(trade(PORTFOLIO, TransactionType.SELL, "IWDA", "4", "2026-06-01T00:00:00Z"));
+        repository.flush();
+
+        List<Holding> inMarch = repository.findHoldingsAsOf(PORTFOLIO, Instant.parse("2026-03-01T00:00:00Z"));
+
+        assertThat(inMarch).singleElement()
+                .satisfies(h -> assertThat(h.quantity()).isEqualByComparingTo("10"));
+    }
+
+    private static Transaction trade(UUID portfolioId, TransactionType type, String symbol,
+                                     String quantity, String executedAt) {
+        return Transaction.of(portfolioId, type, symbol, new BigDecimal(quantity), new BigDecimal("100"),
+                null, null, "EUR", Instant.parse(executedAt));
+    }
+
     private static Transaction cashDeposit(UUID portfolioId, String executedAt, String amount) {
         return Transaction.of(portfolioId, TransactionType.DEPOSIT, null, null, null, null,
                 new BigDecimal(amount), "EUR", Instant.parse(executedAt));
