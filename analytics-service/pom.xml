@@ -30,12 +30,15 @@
              whole reason it can be scaled, restarted or lost without
              consequence. -->
 
-        <!-- WireMock stands in for transaction-service in tests, so the
-             analytics tests never need the other service running. Day 7. -->
+        <!-- WireMock stands in for transaction-service, so these tests never
+             need the other service running - and, more usefully, can make it
+             time out, return a 500 or hand back malformed JSON on demand.
+             The `standalone` build shades its own Jetty and Jackson, so it
+             cannot collide with the versions Spring Boot manages. -->
         <dependency>
-            <groupId>org.wiremock.integrations</groupId>
-            <artifactId>wiremock-spring-boot</artifactId>
-            <version>3.10.0</version>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <version>3.13.2</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

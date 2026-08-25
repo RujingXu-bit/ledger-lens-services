@@ -88,8 +88,8 @@ Prerequisites: JDK 21, Docker.
 ```bash
 docker compose up -d          # Postgres on host port 5433
 ./mvnw verify                 # build + tests (Testcontainers needs Docker running)
-./mvnw -pl transaction-service spring-boot:run
-./mvnw -pl analytics-service  spring-boot:run
+./mvnw -pl transaction-service spring-boot:run   # :8081
+./mvnw -pl analytics-service  spring-boot:run   # :8082
 ```
 
 Load a demo portfolio — 180 trading days of prices for two funds, an opening
@@ -98,6 +98,7 @@ analytics figures computed from it are reproducible:
 
 ```bash
 python3 scripts/seed-demo-data.py
+curl "localhost:8082/api/v1/portfolios/<the-id-it-printed>/performance"
 ```
 
 ```bash
@@ -119,6 +120,7 @@ wedged, restart it", readiness answers "may this instance take traffic yet".
 | `GET` | `/api/v1/portfolios/{id}/holdings?asOf=` | Positions, derived from the ledger. No holdings table exists. |
 | `PUT` | `/api/v1/prices` | Bulk load closing prices. Idempotent. |
 | `GET` | `/api/v1/prices?symbols=&from=&to=` | Closing prices for several symbols over a date range. |
+
 
 No `PUT`, no `DELETE`. The ledger is append-only: a mistaken entry is corrected
 with a reversing transaction, the way double-entry bookkeeping has always done
@@ -203,13 +205,19 @@ invariants the domain enforces are restated as `CHECK` constraints, because
 application code is one way into that table and a migration script or an
 engineer at a `psql` prompt is another.
 
-## analytics-service: the maths
+## analytics-service
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/portfolios/{id}/performance?from=&to=&riskFreeRate=` | The four figures. `from` defaults to the first transaction, `to` to today. |
+
+### The maths
 
 Four figures, all derived from one daily net-asset-value series that this
 service rebuilds from data it does not own — the transaction ledger and the
 price history.
 
-### Time-weighted, not money-weighted
+#### Time-weighted, not money-weighted
 
 The daily return removes external cash flows before measuring anything:
 
@@ -237,7 +245,7 @@ periodic return series, which is precisely what the time-weighted method
 produces. XIRR remains a genuinely useful figure and is a candidate for later,
 not a gap in what is here.
 
-### The rest of the decisions
+#### The rest of the decisions
 
 - **Maximum drawdown is measured on the return index, never on net asset
   value.** A withdrawal lowers NAV without losing anyone a cent; on a NAV series
@@ -262,6 +270,73 @@ not a gap in what is here.
   digits of volatility is already more precision than the prices justify. The
   conversion happens at the boundary, so the API never publishes a float.
 
+### Talking to transaction-service
+
+One class, `TransactionServiceClient`, knows the other service exists.
+Everything above it works in domain types, so replacing REST with a queue or a
+local database changes that file and nothing else.
+
+`RestClient`, not `RestTemplate` (superseded) and not `WebClient` (a reactive
+stack for one blocking fetch followed by arithmetic).
+
+#### What a synchronous call between services actually needs
+
+**A timeout, and a decision about what happens when it fires.** A call with no
+timeout inherits the operating system's, which is minutes. Under load that
+parks every thread in this service on a dead upstream, and one service's outage
+becomes two. Connect 2s, read 5s, both configurable.
+
+**A retry small enough to be safe.** Both calls are `GET`, so repeating them is
+harmless, and one immediate retry absorbs the common case of a connection
+dropped during a rolling deploy. It stops at two attempts: retries are load
+amplification, and an upstream in trouble receiving every request twice is how
+a slowdown becomes an outage.
+
+**No circuit breaker, and no Resilience4j.** Deliberate. A circuit breaker earns
+its keep when there is enough traffic for it to observe and enough instances for
+the failure to be worth isolating; here it would be configuration nobody can
+justify. The short timeout plus the bounded retry covers the same failure mode
+at a fraction of the reasoning cost.
+
+**A fallback that is honest about itself.** The last successful answer is kept
+in a small bounded LRU cache. When transaction-service cannot be reached, that
+answer is served with `"stale": true`, its `computedAt` timestamp, and
+`Cache-Control: no-store` so nothing downstream caches it again. Past the
+tolerance (15 minutes, configurable) the cache stops answering and the request
+gets a `503` with `Retry-After`.
+
+Whether stale beats nothing is a product decision, not a technical one: for a
+performance dashboard a clearly-labelled figure from ten minutes ago is more
+useful than an error page; for anything that moves money it would not be. What
+makes it defensible either way is that the staleness is always reported.
+
+The cache does not make this service stateful in the sense that matters. It owns
+nothing: every entry is reproducible from transaction-service, losing it costs
+one recomputation, and no instance needs to agree with any other.
+
+#### Failure translation
+
+| Upstream did | analytics-service answers |
+|---|---|
+| timed out, refused, or 5xx — cached result available | `200` with `"stale": true` |
+| timed out, refused, or 5xx — nothing usable cached | `503` + `Retry-After`, upstream's message not echoed |
+| returned an empty ledger | `404` — a definite answer that there is nothing to measure |
+| returned too few valuation points | `422` |
+
+The first two rows are the distinction that matters: `503` says nothing is wrong
+with *this* service, so retrying may work — unlike a `500`, which says it will
+not. And `404` is never used for an outage; telling a caller their portfolio is
+empty when the system of record is merely down is worse than any error.
+
+Watch it degrade, with transaction-service stopped:
+
+```
+upstream up     200  Cache-Control: max-age=60  "stale": false
+upstream down   200  Cache-Control: no-store    "stale": true   (same figures, computedAt from before)
+unknown id      503  Retry-After: 30            problem+json, no cached result to fall back on
+/actuator/health of analytics-service:  UP      — it is not the broken one
+```
+
 ### Verified twice
 
 `scripts/crosscheck-metrics.py` is a second, independent implementation of the
@@ -271,11 +346,8 @@ misunderstanding baked into both the code and its tests. Two implementations
 agreeing is weak-but-real evidence. Disagreement is a definite bug in one of
 them.
 
-The Python figures below are the reference. The Java calculator cannot fetch
-this data until the inter-service client lands on day 5, so the comparison
-between the two happens then — as of day 4 these numbers stand unmatched.
-
-On the seeded demo portfolio:
+On the seeded demo portfolio the two implementations agree on every figure to
+six decimal places, over 179 daily observations:
 
 | | |
 |---|---|
@@ -286,6 +358,10 @@ On the seeded demo portfolio:
 | Annualised volatility | 13.81% |
 | Maximum drawdown | −7.02% |
 | Sharpe ratio (rf = 0) | 1.67 |
+
+Both columns produced these; the Java figures come from
+`GET /api/v1/portfolios/{id}/performance` with both services running, the Python
+ones from the script reading the same two endpoints directly.
 
 Note the first two rows together: the account grew 41% while the investments
 returned 15.9%. The difference is contributions — which is exactly the
@@ -301,6 +377,8 @@ Four tiers, fastest first, each failing for one reason:
 | `TransactionControllerTest` (`@WebMvcTest`) | routing, validation, status codes, error bodies | web layer only, service mocked |
 | `TransactionRepositoryTest` (`@DataJpaTest`) | the SQL, the mapping, the DB constraints | real Postgres |
 | `TransactionApiIntegrationTest` (`@SpringBootTest`) | that the three are wired together | full stack |
+| `PerformanceCalculatorTest`, `ValuationSeriesTest` | the analytics maths and the cash-flow rules | no Spring, 34ms |
+| `PerformanceApiWireMockTest` | the inter-service call, including its failure modes | WireMock stands in for transaction-service |
 
 Every database test runs against a real PostgreSQL container, never H2. An
 in-memory database that is not the production database only proves the code
@@ -311,6 +389,18 @@ context cache, instead of one container per test class.
 
 One test writes raw SQL around the entity to prove the `CHECK` constraints hold
 even when the domain model is bypassed.
+
+The WireMock tests are not there for the happy path. They exist because a stub
+can be made to hang for four seconds, return a 500, or drop the connection
+mid-response on demand — the cases that decide whether this service degrades or
+falls over, and which cannot be provoked reliably against a real upstream. One
+of them asserts that a timeout is measured in seconds rather than in whatever
+the operating system would have allowed.
+
+Its fixtures are hand-written JSON, not the other module's DTO classes. Sharing
+the real types would make these tests pass whenever both services were wrong in
+the same way; a hand-written fixture is a statement about the contract as
+published.
 
 ## Configuration
 

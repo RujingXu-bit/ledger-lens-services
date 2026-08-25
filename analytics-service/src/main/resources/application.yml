@@ -11,6 +11,18 @@ server:
 ledgerlens:
   transaction-service:
     base-url: http://localhost:8081
+    # Short on purpose. A call with no timeout inherits the operating system's,
+    # which is minutes; under load every thread here ends up parked on a dead
+    # upstream and one service's outage becomes two.
+    connect-timeout: 2s
+    read-timeout: 5s
+    # Total attempts including the first. Retries are load amplification, so
+    # this stays at two: enough to absorb one dropped connection during a
+    # rolling deploy, not enough to turn an upstream slowdown into an outage.
+    max-attempts: 2
+    # How old a cached result may be and still be served during an outage.
+    # Past this, an error is more honest than a stale number.
+    stale-tolerance: 15m
 
 management:
   endpoints:
