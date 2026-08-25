@@ -1181,6 +1181,32 @@ That third check is deliberately not an assertion about seeded data. A smoke
 test that fails whenever someone resets the database is a smoke test people
 learn to ignore.
 
+### A failed smoke test rolls the deployment back
+
+Detecting a bad deployment and leaving it in production is not much better than
+not detecting it. That was the state after the week 2 review: run 3 deployed,
+then failed its smoke test, and production stayed on the unverified build.
+
+Both apps run in **Single revision mode**, so deploying deactivates the revision
+it replaces — there is no previous revision to switch traffic back to. Rollback
+therefore means redeploying a specific image tag, and that tag has to be
+recorded while it is still the running one:
+
+```
+Deploy    → record the running images to a pipeline artifact, then replace them
+SmokeTest → Smoke job: verify
+          → Rollback job: condition failed() — redeploy the recorded images,
+                          then check readiness against the restored revision
+```
+
+Two deliberate details. The rollback job does **not** turn the run green: the
+smoke test has already failed, the stage stays red, and somebody still has to
+look. What it changes is whether production is broken while they do. And the
+previous images travel as a **pipeline artifact** rather than a cross-stage
+output variable — referencing outputs from a deployment job is fiddly enough
+that this pipeline has already been caught by one such expression, and a file
+is a file.
+
 ### Self-hosted agents, and why that is the default
 
 The pipeline defaults to a self-hosted agent, and this is a decision rather than

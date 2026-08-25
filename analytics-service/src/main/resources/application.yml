@@ -19,6 +19,11 @@ server:
 # day 8, a Container Apps internal FQDN on day 10, a Kubernetes Service name on
 # day 12. Only this one value changes across all four environments.
 ledgerlens:
+  openapi:
+    # The address the published contract names as the live server. Overridable
+    # per environment; the default is the deployment this repository documents.
+    public-url: https://analytics-service.icywater-fe129bae.francecentral.azurecontainerapps.io
+
   transaction-service:
     base-url: http://localhost:8081
     # Short on purpose. A call with no timeout inherits the operating system's,

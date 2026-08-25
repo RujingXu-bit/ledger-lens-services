@@ -1,3 +1,10 @@
+ledgerlens:
+  openapi:
+    # Documented, not reachable: this address only resolves inside the Container
+    # Apps environment. Naming it in the contract is how a consumer learns the
+    # service exists and that there is deliberately no public route to it.
+    internal-url: https://transaction-service.internal.icywater-fe129bae.francecentral.azurecontainerapps.io
+
 spring:
   lifecycle:
     # How long graceful shutdown may take before the JVM stops regardless. Must

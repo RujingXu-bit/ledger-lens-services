@@ -10,6 +10,7 @@ import io.swagger.v3.oas.models.media.StringSchema;
 import io.swagger.v3.oas.models.servers.Server;
 import io.swagger.v3.oas.models.tags.Tag;
 import java.util.List;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -27,6 +28,15 @@ import org.springframework.context.annotation.Configuration;
  */
 @Configuration
 public class OpenApiConfiguration {
+
+    /**
+     * The internal address this service answers on inside its environment.
+     * A property rather than a literal, for the same reason as its public
+     * counterpart: an environment recreated under a different generated suffix
+     * should be a configuration change, not a code change.
+     */
+    @Value("${ledgerlens.openapi.internal-url}")
+    private String internalUrl;
 
     @Bean
     OpenAPI transactionServiceOpenApi() {
@@ -72,8 +82,7 @@ public class OpenApiConfiguration {
                 // published artifact depend on who generated it - and, once this is
                 // deployed, says localhost about a service that does not live there.
                 .servers(List.of(
-                        new Server()
-                                .url("https://transaction-service.internal.icywater-fe129bae.francecentral.azurecontainerapps.io")
+                        new Server().url(internalUrl)
                                 .description("Azure Container Apps — internal ingress. Reachable only from "
                                         + "inside the environment; there is deliberately no public address."),
                         new Server().url("http://localhost:8081").description("Local development")))

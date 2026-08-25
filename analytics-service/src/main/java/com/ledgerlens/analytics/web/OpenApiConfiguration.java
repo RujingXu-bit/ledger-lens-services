@@ -10,11 +10,22 @@ import io.swagger.v3.oas.models.media.StringSchema;
 import io.swagger.v3.oas.models.servers.Server;
 import io.swagger.v3.oas.models.tags.Tag;
 import java.util.List;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
 public class OpenApiConfiguration {
+
+    /**
+     * Where this service actually answers. A property rather than a literal:
+     * the previous version hard-coded the Container Apps FQDN in this file, so
+     * recreating that environment - which changes its generated suffix - would
+     * have left the published contract naming a host that no longer exists,
+     * fixable only by editing code and redeploying.
+     */
+    @Value("${ledgerlens.openapi.public-url}")
+    private String publicUrl;
 
     @Bean
     OpenAPI analyticsServiceOpenApi() {
@@ -54,8 +65,7 @@ public class OpenApiConfiguration {
                         .contact(new Contact().name("Ledger Lens").url("https://github.com/"))
                         .license(new License().name("MIT")))
                 .servers(List.of(
-                        new Server()
-                                .url("https://analytics-service.icywater-fe129bae.francecentral.azurecontainerapps.io")
+                        new Server().url(publicUrl)
                                 .description("Azure Container Apps — the only public surface of this system"),
                         new Server().url("http://localhost:8082").description("Local development")))
                 .tags(List.of(new Tag().name("Performance")

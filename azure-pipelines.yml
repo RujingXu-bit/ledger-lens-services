@@ -211,6 +211,37 @@ stages:
           runOnce:
             deploy:
               steps:
+                # Written down before anything is replaced, because you cannot
+                # roll back to something you did not record.
+                #
+                # Container Apps runs both services in Single revision mode, so
+                # deploying deactivates the revision it replaces and there is
+                # nothing to switch traffic back to. Rollback here means
+                # redeploying a specific image tag, and that tag has to be
+                # captured while it is still the running one.
+                #
+                # A pipeline artifact rather than an output variable on purpose:
+                # cross-stage variable references out of a deployment job are
+                # fiddly enough that this pipeline has already been caught by
+                # one, and a file is a file.
+                - script: |
+                    set -euo pipefail
+                    mkdir -p "$(Build.ArtifactStagingDirectory)/rollback"
+                    OUT="$(Build.ArtifactStagingDirectory)/rollback/previous-images.txt"
+                    : > "$OUT"
+                    for app in transaction-service analytics-service; do
+                      img=$(az containerapp show --name "$app" --resource-group $(resourceGroup) \
+                              --query "properties.template.containers[0].image" -o tsv)
+                      echo "$app=$img" >> "$OUT"
+                    done
+                    echo "currently running, and the target if this deploy has to be undone:"
+                    cat "$OUT"
+                  displayName: Record what is running before replacing it
+
+                - publish: $(Build.ArtifactStagingDirectory)/rollback
+                  artifact: rollback
+                  displayName: Keep it where a later stage can read it
+
                 # transaction-service first. analytics depends on it, so if the
                 # ledger fails to start it is better to find out before the
                 # thing that calls it has been replaced too.
@@ -315,3 +346,50 @@ stages:
               echo
               echo "smoke test passed"
             displayName: Health, running version, and a real call through the chain
+
+      # Detecting a bad deployment and leaving it in production is not much
+      # better than not detecting it. This job runs only when the smoke test
+      # failed, and puts back whatever was running before.
+      #
+      # It deliberately does not make the run green: the Smoke job has already
+      # failed, so the stage stays red and somebody still has to look. What it
+      # changes is whether production is broken while they do.
+      - job: Rollback
+        displayName: Undo the deployment
+        dependsOn: Smoke
+        condition: failed()
+        steps:
+          - checkout: none
+
+          - download: current
+            artifact: rollback
+            displayName: Fetch the images that were running before
+
+          - script: |
+              set -euo pipefail
+              FILE="$(Pipeline.Workspace)/rollback/previous-images.txt"
+              echo "rolling back to:"
+              cat "$FILE"
+
+              while IFS='=' read -r app image; do
+                [ -n "$app" ] || continue
+                echo "--- $app -> $image ---"
+                az containerapp update \
+                  --name "$app" \
+                  --resource-group $(resourceGroup) \
+                  --image "$image"
+              done < "$FILE"
+
+              # A rollback that is not verified is a hope. Same readiness check
+              # the smoke test uses, against the restored revision.
+              URL="https://$(az containerapp show \
+                --name analytics-service --resource-group $(resourceGroup) \
+                --query properties.configuration.ingress.fqdn -o tsv)"
+              echo "verifying the rollback at $URL"
+              for i in $(seq 1 30); do
+                curl -sf --max-time 60 "$URL/actuator/health/readiness" >/dev/null && break
+                sleep 10
+              done
+              curl -sf --max-time 60 "$URL/actuator/health/readiness"; echo
+              echo "rollback complete and answering"
+            displayName: Redeploy the previous images and verify them
