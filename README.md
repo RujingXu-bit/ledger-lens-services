@@ -203,6 +203,94 @@ invariants the domain enforces are restated as `CHECK` constraints, because
 application code is one way into that table and a migration script or an
 engineer at a `psql` prompt is another.
 
+## analytics-service: the maths
+
+Four figures, all derived from one daily net-asset-value series that this
+service rebuilds from data it does not own — the transaction ledger and the
+price history.
+
+### Time-weighted, not money-weighted
+
+The daily return removes external cash flows before measuring anything:
+
+```
+r(t) = ( NAV(t) - NAV(t-1) - CF(t) ) / NAV(t-1)
+```
+
+Without the `CF(t)` term a 1,500 EUR contribution into a 50,000 EUR portfolio
+reads as a 3% gain, and the measurement rewards saving rather than investing.
+
+What counts as an external flow is a business judgement, not a technicality:
+
+| | External? | Why |
+|---|---|---|
+| Deposit / withdrawal | **yes** | changes value without being performance |
+| Buy / sell | no | internal — cash becomes stock; only the fee is a real cost |
+| Dividend | **no** | this *is* return; netting it out erases the performance it represents |
+
+Time-weighted return was chosen over money-weighted (IRR/XIRR) because the same
+daily return series feeds all four figures — chain-link it for total return,
+take its standard deviation for volatility, accumulate it for drawdown. A
+money-weighted return is a separate root-finding algorithm that feeds only
+itself, and a Sharpe ratio built on it would be meaningless: Sharpe needs a
+periodic return series, which is precisely what the time-weighted method
+produces. XIRR remains a genuinely useful figure and is a candidate for later,
+not a gap in what is here.
+
+### The rest of the decisions
+
+- **Maximum drawdown is measured on the return index, never on net asset
+  value.** A withdrawal lowers NAV without losing anyone a cent; on a NAV series
+  a portfolio paying a monthly income would look like a disaster.
+- **Annualisation is geometric**, `(1+r)^(252/n) - 1`, not `r × 252/n`. Returns
+  compound, and the arithmetic version overstates anything volatile.
+- **Volatility uses the sample deviation (n-1).** Dividing by n biases the
+  estimate downwards, which flatters every Sharpe ratio built on it.
+- **The risk-free rate is an input, defaulted to zero and echoed back in the
+  response.** A Sharpe ratio without its risk-free rate is not comparable to
+  anything, and an assumption hidden inside a formula cannot be audited.
+- **Sharpe is `null` when volatility is zero**, because the ratio is undefined
+  rather than infinite.
+- **A missing price fails loudly.** Valuing a held position at zero would show a
+  catastrophic loss that never happened; a wrong number that looks plausible is
+  worse than an error, because nobody investigates it.
+- **Prices are filled forward, never interpolated and never taken from the
+  future.** Valuing today with tomorrow's close is lookahead bias.
+- **Money is `BigDecimal`; the statistics are `double`.** A cash balance must be
+  exact. Standard deviation and geometric annualisation need `sqrt`, `log` and
+  `pow`, which BigDecimal lacks or only approximates — and sixteen significant
+  digits of volatility is already more precision than the prices justify. The
+  conversion happens at the boundary, so the API never publishes a float.
+
+### Verified twice
+
+`scripts/crosscheck-metrics.py` is a second, independent implementation of the
+same formulas in Python, run against the same live data. The Java unit tests
+prove the calculator does what its author intended; they cannot catch a
+misunderstanding baked into both the code and its tests. Two implementations
+agreeing is weak-but-real evidence. Disagreement is a definite bug in one of
+them.
+
+The Python figures below are the reference. The Java calculator cannot fetch
+this data until the inter-service client lands on day 5, so the comparison
+between the two happens then — as of day 4 these numbers stand unmatched.
+
+On the seeded demo portfolio:
+
+| | |
+|---|---|
+| Observations | 179 daily returns |
+| Starting → ending value | 49,997 → 70,712 |
+| **Total return (time-weighted)** | **+15.86%** |
+| Annualised return | +23.03% |
+| Annualised volatility | 13.81% |
+| Maximum drawdown | −7.02% |
+| Sharpe ratio (rf = 0) | 1.67 |
+
+Note the first two rows together: the account grew 41% while the investments
+returned 15.9%. The difference is contributions — which is exactly the
+distinction the time-weighted method exists to draw.
+
 ## Testing
 
 Four tiers, fastest first, each failing for one reason:

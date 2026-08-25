@@ -24,7 +24,11 @@ from datetime import date, datetime, timedelta, timezone
 
 SYMBOLS = {"IWDA": 98.75, "VWCE": 111.50}
 TRADING_DAYS = 180
-SEED = 20260102
+# Chosen, not arbitrary: this path rises, peaks about three quarters of the way
+# through, falls ~7% and ends up. That shape exercises the drawdown calculation
+# properly - on a monotonically falling path, maximum drawdown and total return
+# are the same number and a broken peak-tracker still looks correct.
+SEED = 1963
 
 
 def post(base_url: str, path: str, payload, method: str = "POST"):
