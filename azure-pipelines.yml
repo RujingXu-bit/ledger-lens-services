@@ -106,7 +106,7 @@ stages:
           # minutes of confusion into one line of output.
           - script: |
               echo "PATH=$PATH"
-              echo "JAVA_HOME=${JAVA_HOME:-(unset - the Maven wrapper will use java from PATH)}"
+              echo "JAVA_HOME=${JAVA_HOME:-(unset - the Maven wrapper falls back to java on PATH)}"
               java -version
               docker --version && docker info --format 'docker daemon: {{.ServerVersion}}'
               az account show --query "{subscription:name, user:user.name}" -o tsv

@@ -1008,11 +1008,13 @@ every directory the pipeline shells out to:
 Note the third line: Docker Desktop puts its CLI inside the app bundle, not
 where the rest of the tooling lives.
 
-`.env` in the same directory is **not** applied by `runsvc.sh` — only `env.sh`
-touches it — so `JAVA_HOME` cannot be set that way. It does not need to be: the
-Maven wrapper falls back to `java` on `PATH` when `JAVA_HOME` is unset, and the
-JDK 21 directory is first in the list. The pipeline prints the whole toolchain
-before using it rather than assuming any of this.
+`.env` in the same directory carries everything else — `JAVA_HOME` here. It is
+read by the agent process itself, not by `runsvc.sh`, which is why grepping
+`runsvc.sh` for it finds nothing and why the launchd plist contains only
+`VSTS_AGENT_SVC`. The pipeline's first step prints `PATH` and `JAVA_HOME` from
+inside a real job, which is the only way to know any of this rather than infer
+it — an earlier version of this section asserted `.env` was inert, and the run
+log disproved it.
 
 The agent inherits `HOME`, which is what makes the whole design work: `~/.azure`
 holds the signed-in session, so `az` in a pipeline step is already
