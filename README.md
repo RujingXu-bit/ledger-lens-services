@@ -3,7 +3,7 @@
 Portfolio analytics rebuilt as Spring Boot microservices, deployed to Azure and
 described in Kubernetes manifests. The domain — transactions, holdings, return,
 volatility, maximum drawdown, Sharpe ratio — is borrowed from
-[Ledger Lens](https://github.com/) (Python/FastAPI); no code is shared, and the
+Ledger Lens (Python/FastAPI); no code is shared, and the
 original project is untouched.
 
 | | |
@@ -13,6 +13,7 @@ original project is untouched.
 | Build | Maven multi-module (wrapper committed) |
 | Database | PostgreSQL 16 |
 | Tests | JUnit 5, Testcontainers (real Postgres), WireMock |
+| API errors | RFC 9457 `application/problem+json` |
 
 ## Services
 
@@ -99,6 +100,77 @@ curl localhost:8082/actuator/health/liveness
 `/actuator/health/liveness` and `/actuator/health/readiness` exist from day one
 because Kubernetes probes will point at them; liveness answers "is this process
 wedged, restart it", readiness answers "may this instance take traffic yet".
+
+## transaction-service API
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/transactions` | Record a transaction. `201` + `Location`. |
+| `GET` | `/api/v1/transactions/{id}` | One transaction, or `404`. |
+| `GET` | `/api/v1/transactions?portfolioId=&from=&to=&page=&size=` | A portfolio's ledger, oldest first. `portfolioId` is required. |
+
+No `PUT`, no `DELETE`. The ledger is append-only: a mistaken entry is corrected
+with a reversing transaction, the way double-entry bookkeeping has always done
+it. That is also what lets every analytics figure be recomputed from scratch.
+
+Types modelled: `BUY`, `SELL`, `DIVIDEND`, `DEPOSIT`, `WITHDRAWAL`. Enough to
+make the analytics real; corporate actions, FX and short positions are not.
+
+### Errors
+
+Every failure is RFC 9457 `application/problem+json`, so a caller can branch on
+`status` and `type` instead of parsing prose:
+
+| Status | When |
+|---|---|
+| `400` | The payload's *shape* is wrong — missing field, negative quantity, unparseable UUID. Every field error is reported at once. |
+| `422` | The payload is well-formed but describes an impossible transaction — a `BUY` with no symbol, a `DEPOSIT` carrying a quantity. |
+| `404` | No such transaction. |
+
+The 400/422 split is deliberate: it tells the caller whether to fix their
+serialiser or their understanding of the domain. Bean Validation on the request
+record enforces shape; `Transaction.of` enforces meaning.
+
+### Money
+
+`BigDecimal` throughout, never `double` — binary floating point cannot represent
+0.10, and a ledger that cannot represent ten cents is not a ledger. Cash is
+scaled to 4 decimal places and quantities to 8 (fractional shares), rounded
+`HALF_EVEN`, because `HALF_UP` is biased upwards and that bias accumulates into
+money nobody paid.
+
+The signed `cashAmount` is always computed server-side and never accepted from
+the client. A client that could set it could book a purchase that increases the
+cash balance.
+
+### Schema
+
+Flyway owns the schema; Hibernate runs with `ddl-auto: validate` and refuses to
+start if the entities and the migrated tables have drifted apart. The same
+invariants the domain enforces are restated as `CHECK` constraints, because
+application code is one way into that table and a migration script or an
+engineer at a `psql` prompt is another.
+
+## Testing
+
+Four tiers, fastest first, each failing for one reason:
+
+| Tier | What it proves | Cost |
+|---|---|---|
+| `TransactionTest` | the domain rules and the arithmetic | no Spring, milliseconds |
+| `TransactionControllerTest` (`@WebMvcTest`) | routing, validation, status codes, error bodies | web layer only, service mocked |
+| `TransactionRepositoryTest` (`@DataJpaTest`) | the SQL, the mapping, the DB constraints | real Postgres |
+| `TransactionApiIntegrationTest` (`@SpringBootTest`) | that the three are wired together | full stack |
+
+Every database test runs against a real PostgreSQL container, never H2. An
+in-memory database that is not the production database only proves the code
+compiles against JPA — it will happily accept SQL Postgres rejects, and reject
+SQL Postgres accepts. The container is declared once as a bean in
+`PostgresTestcontainerConfiguration` and reused across classes via Spring's test
+context cache, instead of one container per test class.
+
+One test writes raw SQL around the entity to prove the `CHECK` constraints hold
+even when the domain model is bypassed.
 
 ## Configuration
 

@@ -1,32 +1,39 @@
 package com.ledgerlens.transaction;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
+import org.springframework.context.annotation.Import;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
- * Smoke test: the Spring context starts and the JPA layer connects.
+ * Smoke test: the context starts, Flyway has migrated, and Hibernate's
+ * {@code ddl-auto: validate} agrees that the entities match the schema.
  *
- * <p>The database is a real Postgres in a throwaway container, started by
- * Testcontainers and thrown away afterwards. {@code @ServiceConnection} is the
- * part worth remembering: Spring Boot reads the container's host, port,
- * username and password and overrides {@code spring.datasource.*} with them, so
- * there is no duplicated JDBC URL anywhere in the test code.
+ * <p>That last part is the value here. This test fails the moment an entity
+ * field and a migration disagree, which is the single most common way a JPA
+ * service breaks between "compiles" and "starts in production".
  */
 @SpringBootTest
-@Testcontainers
+@Import(PostgresTestcontainerConfiguration.class)
 class TransactionServiceApplicationTests {
 
-    @Container
-    @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    @Autowired
+    private DataSource dataSource;
 
     @Test
-    void contextLoads() {
-        // Failing here means the wiring is broken before a single line of
-        // domain code exists - which is exactly what a skeleton should prove.
+    void contextLoadsAndSchemaIsMigrated() {
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+
+        Integer migrationsApplied = jdbc.queryForObject(
+                "select count(*) from flyway_schema_history where success = true", Integer.class);
+        assertThat(migrationsApplied).isGreaterThanOrEqualTo(1);
+
+        Integer transactionsTable = jdbc.queryForObject(
+                "select count(*) from information_schema.tables where table_name = 'transactions'", Integer.class);
+        assertThat(transactionsTable).isEqualTo(1);
     }
 }

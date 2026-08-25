@@ -11,13 +11,28 @@ spring:
     username: ledgerlens
     password: ledgerlens
 
+  # Flyway runs every migration in db/migration before Hibernate looks at the
+  # schema, on every start, in every environment. The alternative - a human
+  # remembering to run DDL before a deploy - is the alternative that fails.
+  flyway:
+    enabled: true
+
   jpa:
-    # Schema is owned by Flyway migrations from day 3, never by Hibernate.
     hibernate:
-      ddl-auto: none
+      # Flyway owns the schema; Hibernate only checks its entities match it and
+      # refuses to start if they do not. Never `update` outside a toy: it
+      # silently alters production tables and cannot drop or rename anything.
+      ddl-auto: validate
     # Off by default in production code: open-session-in-view keeps a database
     # connection held for the whole request and hides lazy-loading bugs.
     open-in-view: false
+
+  jackson:
+    serialization:
+      # Write 1234.5600 rather than 1.23456E+3. Some JSON parsers turn
+      # exponent-notation numbers into floats, which is how rounding errors
+      # get into money.
+      write-bigdecimal-as-plain: true
 
 server:
   port: 8081
