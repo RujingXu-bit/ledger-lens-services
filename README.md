@@ -588,6 +588,154 @@ belgiumcentral  francecentral  denmarkeast  spaincentral  germanywestcentral
 of the five that has both ACR and Container Apps; Denmark East has ACR but not
 Container Apps, which would have surfaced on day 10 instead of day 9.
 
+## Running on Azure Container Apps
+
+```
+analytics-service     https://analytics-service.icywater-fe129bae.francecentral.azurecontainerapps.io
+transaction-service   internal only — no public address at all
+PostgreSQL            pg-ledgerlens79829b.postgres.database.azure.com
+```
+
+Everything in `rg-ledgerlens`, France Central, deployed from the ACR images
+tagged with the commit that built them.
+
+### The network shape is the point
+
+`transaction-service` has **internal ingress**: it is reachable from inside the
+Container Apps environment and from nowhere else on the internet. That is not a
+detail — it means the ledger cannot be written to by anyone who has not already
+got into the environment, which closes half of the "no authentication" gap in
+the Known limitations without adding an auth layer this project has no time to
+do properly.
+
+`analytics-service` is the only public surface, and it can only read.
+
+### What changed between environments: three environment variables
+
+No code change, no Spring profile, no rebuild — the image running in Azure is
+byte-for-byte the one that ran in Docker Compose.
+
+| | Compose | Azure |
+|---|---|---|
+| `SPRING_DATASOURCE_URL` | `//postgres:5432/ledgerlens` | `//pg-ledgerlens79829b.postgres.database.azure.com:5432/ledgerlens?sslmode=require` |
+| `SPRING_DATASOURCE_PASSWORD` | plain text in the compose file | `secretref:db-password` — a Container Apps secret |
+| `LEDGERLENS_TRANSACTIONSERVICE_BASEURL` | `http://transaction-service:8081` | `https://transaction-service.internal.<env>.azurecontainerapps.io` |
+
+### Scale to zero, and the timeout that had to move because of it
+
+Both apps run with `--min-replicas 0`.
+
+```
+Container Apps free grant   180,000 vCPU-seconds/month
+one replica kept warm       0.5 vCPU x 2,592,000 s = 1,296,000  → 7.2x the grant, ~$27/month
+scaled to zero, idle        ~0                                   → $0
+```
+
+A demo that is idle 99.9% of the time has no business holding a warm replica.
+But scale-to-zero means the first request pays for a JVM start, and
+analytics-service's 5-second read timeout — correct against a warm service — is
+not a promise a cold one can keep.
+
+The fix needed no code, because day 5 made the timeout configuration rather than
+a constant: `LEDGERLENS_TRANSACTIONSERVICE_READTIMEOUT=30s` in Azure only. The
+timeout belongs to the environment because the callee's promise belongs to the
+environment.
+
+### Probes: the bug that only appears in the cloud
+
+The first deployment answered its first request in over two minutes. The system
+log said why:
+
+```
+ProbeFailed x6 ... KEDAScalersStopped ... ContainerTerminated
+```
+
+Container Apps' default probe was killing the JVM before it finished starting,
+in a loop. Nothing local reproduces this — Compose's healthcheck has a
+`start-period`, and a laptop starts the app faster than the platform's patience.
+
+The Actuator liveness and readiness endpoints have existed since day 1 for
+Kubernetes on day 12; they turned out to be needed a fortnight early. Both apps
+now declare:
+
+| Probe | Endpoint | Tolerance |
+|---|---|---|
+| Startup | `/actuator/health/liveness` | 30 failures x 5s = 150s to boot |
+| Readiness | `/actuator/health/readiness` | stops traffic before the app is ready to serve it |
+| Liveness | `/actuator/health/liveness` | restarts a wedged process, not a slow one |
+
+The startup probe is the one that matters: it tells the platform "do not judge
+me by the liveness probe yet". A liveness probe with no startup probe in front
+of it is how a slow-starting application gets restarted forever.
+
+Measured, on a genuine cold start after both apps had scaled to zero:
+
+| | first request | warm |
+|---|---|---|
+| Without probes | did not complete in 120 s (`ProbeFailed` x6 → `ContainerTerminated`) | — |
+| With probes | **65.6 s, HTTP 200** | 0.5 s |
+
+Two JVMs and two image pulls happen in that 65 seconds — analytics wakes, and
+waking analytics is what wakes transaction-service.
+
+### The cold start proved out the day 5 design
+
+The analytics log from that request:
+
+```
+attempt 1/2 to fetch transactions page 0 failed: ... Request cancelled
+```
+
+The first attempt hit the 30-second read timeout — and that attempt is precisely
+what woke the cold upstream. The bounded retry then succeeded, and the response
+came back with `"stale": false`, meaning the fallback cache was never needed.
+
+Three decisions from day 5 paid off at once, none of them written with this
+situation in mind: a retry small enough to be safe but present, a timeout that
+is configuration rather than a constant, and a cache that degrades only when
+nothing else works.
+
+### Loading data into a service with no public address
+
+A real consequence of network isolation: the seed script on a laptop cannot
+reach an internal service, and the Postgres firewall does not admit a home IP
+either. The options were exec-and-wget for 389 requests, writing SQL straight
+into the database and reimplementing the domain rules that compute
+`cashAmount`, or briefly enabling external ingress.
+
+The third, time-boxed to about two minutes and reverted immediately, was
+chosen. Written down because it is a compromise: a production answer is a
+migration job running inside the environment, which is where this would go if
+it needed doing twice.
+
+### Verified end to end
+
+The public endpoint returns the same seven figures as the local run and the
+independent Python implementation:
+
+```
+totalReturn 0.158612 · annualisedReturn 0.230306 · moneyWeightedReturn 0.236190
+volatility 0.138144 · maxDrawdown -0.070159 · sharpe 1.667139 · 179 observations
+```
+
+### Cost
+
+| | |
+|---|---|
+| PostgreSQL Flexible Server B1MS, 32 GB | **$0** — Azure for Students includes 750 h/month of B1MS for 12 months |
+| Container Apps, scaled to zero | **$0** within the monthly free grant |
+| Log Analytics | **$0** within 5 GB/month ingestion |
+| ACR Basic | **$0.167/day** — the only meter running |
+
+The database is inside the free allowance only while it stays exactly as
+provisioned: `Standard_B1ms`, 32 GB with autogrow **off**, no high
+availability, no geo-redundant backup. Any one of those changes starts billing,
+which is why they are pinned explicitly rather than left to defaults.
+
+```bash
+az group delete --name rg-ledgerlens --yes   # stops everything
+```
+
 ## The API contract
 
 Both services describe themselves in OpenAPI 3, generated by springdoc from the
@@ -737,7 +885,8 @@ oversight — but none of them is defensible while it is invisible.
 
 | | |
 |---|---|
-| **No authentication.** Both services are open. Anyone reachable can record transactions and restate prices. | Acceptable while it runs on a laptop; a decision has to be taken before it is deployed. |
+| **No authentication.** | Half-closed on Azure: `transaction-service` has internal ingress and no public address, so the ledger is not writable from the internet. `analytics-service` is public and read-only. Neither has an identity layer, so anything inside the environment is trusted. |
+| **The database firewall allows all Azure services.** The rule is `0.0.0.0–0.0.0.0`, which despite the notation means "any resource in any Azure tenant", not "any IP" — the password is the only barrier. | A deliberate choice for simplicity. The tighter version was one command away: the Container Apps environment has a static outbound IP (`20.19.41.54`) and the firewall could name only that. Private networking with a VNet is the production answer and was out of scope. |
 | **Selling more than you hold is allowed**, and produces a negative holding. | Sufficient-quantity is an invariant across the whole ledger, not within one transaction, so enforcing it means reading aggregate state on every write. Not implemented; short positions are therefore representable. |
 | **A cash-only portfolio cannot be measured.** With no securities there are no prices, and the valuation calendar is derived from price data, so there are no valuation points. | Fails loudly with a `422`, but the message says "not enough data" rather than naming the real cause. |
 | **`GET /api/v1/prices` has no bound** on symbol count or date range, while transactions cap a page at 500. | The asymmetry is unintentional. |
