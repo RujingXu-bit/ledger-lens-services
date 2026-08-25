@@ -984,6 +984,40 @@ expires, which is a worse failure mode than a secret rotating on a schedule.
 One incidental benefit: nothing in the pipeline requires the Azure DevOps
 organisation to live in the same tenant as the subscription.
 
+### Running the agent as a service, and the one thing that breaks
+
+The agent is installed with `svc.sh install`, so it runs under launchd rather
+than in a terminal — which means it does **not** inherit the shell's
+environment. A launchd agent on macOS starts with:
+
+```
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+```
+
+Homebrew, the JDK and the Docker CLI are all invisible to it. `runsvc.sh` reads
+a `.path` file in the agent's root and exports it, so that file has to name
+every directory the pipeline shells out to:
+
+```
+/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home/bin
+/opt/homebrew/bin
+/Applications/Docker.app/Contents/Resources/bin   <- not under Homebrew
+/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+```
+
+Note the third line: Docker Desktop puts its CLI inside the app bundle, not
+where the rest of the tooling lives.
+
+`.env` in the same directory is **not** applied by `runsvc.sh` — only `env.sh`
+touches it — so `JAVA_HOME` cannot be set that way. It does not need to be: the
+Maven wrapper falls back to `java` on `PATH` when `JAVA_HOME` is unset, and the
+JDK 21 directory is first in the list. The pipeline prints the whole toolchain
+before using it rather than assuming any of this.
+
+The agent inherits `HOME`, which is what makes the whole design work: `~/.azure`
+holds the signed-in session, so `az` in a pipeline step is already
+authenticated.
+
 ### What still has to be done by hand
 
 Creating the Azure DevOps organisation and registering the self-hosted agent are

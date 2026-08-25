@@ -101,6 +101,22 @@ stages:
             name: meta
             displayName: Resolve the image tag from the commit
 
+          # Printed before anything uses them, because on a self-hosted agent
+          # the environment is whatever the service manager decided rather than
+          # whatever the terminal has. A launchd agent on macOS starts with
+          # PATH=/usr/bin:/bin:/usr/sbin:/sbin, so Homebrew, the JDK and the
+          # Docker CLI are all invisible until the agent's `.path` file names
+          # them. When that is wrong the symptom is "command not found" for
+          # something that plainly works in a shell, and this step turns ten
+          # minutes of confusion into one line of output.
+          - script: |
+              echo "PATH=$PATH"
+              echo "JAVA_HOME=${JAVA_HOME:-(unset - the Maven wrapper will use java from PATH)}"
+              java -version
+              docker --version && docker info --format 'docker daemon: {{.ServerVersion}}'
+              az account show --query "{subscription:name, user:user.name}" -o tsv
+            displayName: Show the toolchain this agent actually has
+
           # Keyed on the POMs, so it is reused for every commit that does not
           # change a dependency - which is nearly all of them.
           - task: Cache@2
