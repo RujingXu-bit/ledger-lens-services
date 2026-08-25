@@ -1,5 +1,9 @@
 # ledger-lens-services
 
+[![Build Status](https://dev.azure.com/rujingxu-ledgerlens/ledger-lens-services/_apis/build/status/ledger-lens-services?branchName=main)](https://dev.azure.com/rujingxu-ledgerlens/ledger-lens-services/_build/latest?definitionId=1&branchName=main)
+[![Live](https://img.shields.io/badge/live-analytics--service-0078D4)](https://analytics-service.icywater-fe129bae.francecentral.azurecontainerapps.io/swagger-ui.html)
+[![License](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+
 Portfolio analytics rebuilt as Spring Boot microservices, deployed to Azure and
 described in Kubernetes manifests. The domain — transactions, holdings, return,
 volatility, maximum drawdown, Sharpe ratio — is borrowed from
@@ -953,6 +957,58 @@ switches it, and the `pool` and `JAVA_HOME` both follow from that one parameter.
 Public Azure DevOps projects would once have given ten free hosted jobs with no
 linkage at all. They can no longer be created, and existing ones convert to
 private in 2027.
+
+### What a green run looks like
+
+```
+Build and test               succeeded   62s    97 tests, 10 real Postgres containers
+Build and push images        succeeded   12s    both images cross-built for amd64
+Deploy to Container Apps     succeeded   41s
+Prove the deployment works   succeeded   10s
+```
+
+The smoke test's own output, which is the part worth reading:
+
+```
+target: https://analytics-service.icywater-fe129bae.francecentral.azurecontainerapps.io
+{"status":"UP"}
+verifying the running revision came from this commit (expecting 0.1.0-927f60c)
+running image: acrledgerlens79829b.azurecr.io/analytics-service:0.1.0-927f60c
+matches this build
+exercising the call chain with a portfolio that cannot exist
+status: 404
+{"type":".../not-found","title":"Portfolio not found",...}
+smoke test passed
+```
+
+### The first run failed, and the failure was in the check rather than the deploy
+
+Worth recording because the error message was actively misleading:
+
+```
+running image: ...analytics-service:0.1.0-97cc72a
+deployed image is not this build
+```
+
+Both lines are about the same build. `stageDependencies` can only read stages
+the current stage declares a dependency on, and `SmokeTest` said
+`dependsOn: Deploy` while reading `stageDependencies.Verify...`. The variable
+resolved to an empty string, the shell pattern degenerated to `*:0.1.0-`, and an
+assertion that could never pass reported a deployment failure that had not
+happened. `Deploy` was unaffected because it lists `Verify` explicitly.
+
+The fix is two lines — `Verify` added to `dependsOn`, which changes no ordering
+— plus a guard that fails the stage with the real cause if the expected tag is
+ever empty again:
+
+> A check that cannot tell "the wrong build was deployed" from "I could not work
+> out which build to expect" is worse than no check, because it sends you to
+> look in the wrong place.
+
+Three earlier attempts never reached a run at all: the root `pool` context
+rejects template expressions, both a `${{ if }}` block and a bare
+`${{ parameters.x }}` reference. Selecting the agent from a parameter was worth
+less than a file that runs.
 
 ### There are no service connections, and that is forced
 
