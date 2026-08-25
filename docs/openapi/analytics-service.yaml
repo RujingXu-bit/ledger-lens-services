@@ -36,8 +36,10 @@ info:
     name: MIT
   version: v1
 servers:
+- url: https://analytics-service.icywater-fe129bae.francecentral.azurecontainerapps.io
+  description: Azure Container Apps — the only public surface of this system
 - url: http://localhost:8082
-  description: Generated server url
+  description: Local development
 tags:
 - name: Performance
   description: "Return, volatility, maximum drawdown and the Sharpe ratio"

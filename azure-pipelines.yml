@@ -1,0 +1,278 @@
+# Azure DevOps pipeline: verify -> package -> deploy -> prove it works.
+#
+# Four stages rather than one job, because they fail for different reasons and
+# you want to see which. A red "Verify" is a code problem; a red "Smoke test" is
+# a deployment problem, and the difference is the first thing you want to know
+# at 9am.
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+# Which agent runs this.
+#
+# Self-hosted by default, and that is not a fallback - it is the option that
+# does not require linking this Azure DevOps organisation to the Azure
+# subscription. Microsoft's own documentation lists Azure DevOps Services among
+# the things that can exhaust a subscription's spending limit, and the
+# subscription behind this project is a student grant with a hard cap. The
+# self-hosted free tier is granted automatically, has no monthly minute limit,
+# and costs nothing.
+#
+# The trade-off, stated plainly: a self-hosted agent only runs while the machine
+# hosting it is on. Flip this parameter once hosted parallelism is available.
+parameters:
+  - name: useMicrosoftHostedAgent
+    displayName: Run on Microsoft-hosted agents
+    type: boolean
+    default: false
+  - name: selfHostedPool
+    displayName: Self-hosted agent pool name
+    type: string
+    default: Default
+
+pool:
+  ${{ if parameters.useMicrosoftHostedAgent }}:
+    vmImage: ubuntu-latest
+  ${{ else }}:
+    name: ${{ parameters.selfHostedPool }}
+
+variables:
+  # Set once, used by every stage. The registry and resource group are the ones
+  # created on day 9; the service connections are created in the Azure DevOps
+  # UI and named here.
+  - name: acrLoginServer
+    value: acrledgerlens79829b.azurecr.io
+  - name: acrServiceConnection
+    value: ledgerlens-acr
+  - name: azureServiceConnection
+    value: ledgerlens-azure
+  - name: resourceGroup
+    value: rg-ledgerlens
+  # Microsoft-hosted Ubuntu agents expose every installed JDK under a variable
+  # like this one. Pinning it beats hoping the default happens to be 21 - a
+  # silent JDK 17 is a confusing failure and a silent JDK 25 is a worse one. On
+  # a self-hosted agent the machine's own JAVA_HOME is already correct, so this
+  # is only set for hosted runs.
+  - ${{ if parameters.useMicrosoftHostedAgent }}:
+      - name: JAVA_HOME
+        value: $(JAVA_HOME_21_X64)
+
+stages:
+
+  # ---------------------------------------------------------------------------
+  - stage: Verify
+    displayName: Build and test
+    jobs:
+      - job: Maven
+        displayName: mvn verify
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - script: echo "##vso[task.setvariable variable=shortSha;isOutput=true]$(git rev-parse --short HEAD)"
+            name: meta
+            displayName: Resolve the image tag from the commit
+
+          # Keyed on the POMs, so it is reused for every commit that does not
+          # change a dependency - which is nearly all of them.
+          - task: Cache@2
+            displayName: Cache the Maven repository
+            inputs:
+              key: 'maven | "$(Agent.OS)" | **/pom.xml'
+              restoreKeys: |
+                maven | "$(Agent.OS)"
+              path: $(HOME)/.m2/repository
+
+          # The tests run here exactly as they run on a laptop. Nothing is
+          # skipped and nothing is weakened: Testcontainers starts a real
+          # PostgreSQL because the hosted agent has a Docker daemon, and
+          # WireMock needs nothing but a port. A CI run that quietly drops the
+          # database tests is a CI run that proves less than it appears to.
+          - script: ./mvnw -B verify
+            displayName: Build and run all tests
+
+          # Published separately so a failure is a list of test names in the UI
+          # rather than something you go hunting for in 2,000 lines of log.
+          - task: PublishTestResults@2
+            displayName: Publish test results
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: '**/surefire-reports/TEST-*.xml'
+              mergeTestResults: true
+              failTaskOnFailedTests: true
+
+  # ---------------------------------------------------------------------------
+  - stage: Package
+    displayName: Build and push images
+    dependsOn: Verify
+    condition: succeeded()
+    variables:
+      shortSha: $[ stageDependencies.Verify.Maven.outputs['meta.shortSha'] ]
+    jobs:
+      - job: Images
+        displayName: Push to ACR
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          # Both images are built from the repository root, because each
+          # Dockerfile needs the parent POM and the Maven wrapper above it.
+          #
+          # The image is tagged with the commit, never `latest`: a moving tag
+          # means "which build is in production" has no answer and a rollback
+          # has nothing to roll back to.
+          - task: Docker@2
+            displayName: transaction-service
+            inputs:
+              command: buildAndPush
+              containerRegistry: $(acrServiceConnection)
+              repository: transaction-service
+              Dockerfile: transaction-service/Dockerfile
+              buildContext: $(Build.SourcesDirectory)
+              tags: 0.1.0-$(shortSha)
+
+          - task: Docker@2
+            displayName: analytics-service
+            inputs:
+              command: buildAndPush
+              containerRegistry: $(acrServiceConnection)
+              repository: analytics-service
+              Dockerfile: analytics-service/Dockerfile
+              buildContext: $(Build.SourcesDirectory)
+              tags: 0.1.0-$(shortSha)
+
+  # ---------------------------------------------------------------------------
+  - stage: Deploy
+    displayName: Deploy to Container Apps
+    dependsOn:
+      - Verify
+      - Package
+    # Pull requests build and test, but only main deploys. Without this
+    # condition every PR would deploy itself over production.
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    variables:
+      shortSha: $[ stageDependencies.Verify.Maven.outputs['meta.shortSha'] ]
+    jobs:
+      # A deployment job rather than a plain job: Azure DevOps then records a
+      # deployment history against the environment - what went out, when, from
+      # which commit - which is the record you want when something breaks.
+      - deployment: ContainerApps
+        displayName: Update both revisions
+        environment: ledgerlens-production
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # transaction-service first. analytics depends on it, so if the
+                # ledger fails to start it is better to find out before the
+                # thing that calls it has been replaced too.
+                - task: AzureCLI@2
+                  displayName: transaction-service
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      az containerapp update \
+                        --name transaction-service \
+                        --resource-group $(resourceGroup) \
+                        --image $(acrLoginServer)/transaction-service:0.1.0-$(shortSha)
+
+                - task: AzureCLI@2
+                  displayName: analytics-service
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      az containerapp update \
+                        --name analytics-service \
+                        --resource-group $(resourceGroup) \
+                        --image $(acrLoginServer)/analytics-service:0.1.0-$(shortSha)
+
+  # ---------------------------------------------------------------------------
+  - stage: SmokeTest
+    displayName: Prove the deployment works
+    dependsOn: Deploy
+    condition: succeeded()
+    variables:
+      shortSha: $[ stageDependencies.Verify.Maven.outputs['meta.shortSha'] ]
+    jobs:
+      - job: Smoke
+        displayName: Hit the public endpoint
+        steps:
+          - checkout: none
+
+          # "Deployed successfully" only means the platform accepted a new
+          # revision. This asks the running system a question and checks the
+          # answer, which is the difference between deploying and knowing.
+          #
+          # Generous timeouts on purpose: both apps scale to zero, so the first
+          # request pays for two JVM starts.
+          - task: AzureCLI@2
+            displayName: Health, version and a real computation
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                URL="https://$(az containerapp show \
+                  --name analytics-service --resource-group $(resourceGroup) \
+                  --query properties.configuration.ingress.fqdn -o tsv)"
+                echo "target: $URL"
+
+                echo "waiting for readiness (cold start)"
+                for i in $(seq 1 30); do
+                  curl -sf --max-time 60 "$URL/actuator/health/readiness" >/dev/null && break
+                  sleep 10
+                done
+                curl -sf --max-time 60 "$URL/actuator/health/readiness"
+
+                # The deployed build must be the build this pipeline produced.
+                # Without this check a failed rollout looks identical to a
+                # successful one: the old revision answers happily.
+                echo "verifying the running revision came from this commit"
+                RUNNING=$(az containerapp show --name analytics-service \
+                  --resource-group $(resourceGroup) \
+                  --query "properties.template.containers[0].image" -o tsv)
+                echo "running image: $RUNNING"
+                case "$RUNNING" in
+                  *:0.1.0-$(shortSha)) echo "matches this build" ;;
+                  *) echo "deployed image is not this build" >&2; exit 1 ;;
+                esac
+
+                # Proving the inter-service call works, without depending on any
+                # particular data being present.
+                #
+                # A random portfolio id must come back 404, and only the full
+                # chain can produce that: analytics has to reach
+                # transaction-service over internal ingress and be told the
+                # ledger is empty. If the ledger were unreachable the answer
+                # would be 503, and if analytics itself were broken it would be
+                # 5xx. Asserting on seeded data instead would make this stage
+                # fail whenever someone reset the database - a false alarm that
+                # trains people to ignore the alarm.
+                echo "exercising the call chain with a portfolio that cannot exist"
+                CODE=$(curl -s -o /tmp/probe.json -w '%{http_code}' --max-time 120 \
+                  "$URL/api/v1/portfolios/$(uuidgen | tr 'A-Z' 'a-z')/performance")
+                echo "status: $CODE"
+                cat /tmp/probe.json; echo
+                if [ "$CODE" != "404" ]; then
+                  echo "expected 404 from a healthy chain; a 503 means transaction-service is unreachable" >&2
+                  exit 1
+                fi
+                grep -q '"title":"Portfolio not found"' /tmp/probe.json
+
+                echo
+                echo "smoke test passed"

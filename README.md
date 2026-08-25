@@ -878,6 +878,89 @@ development defaults only; Spring Boot maps environment variables onto the same
 keys (`SPRING_DATASOURCE_URL`, `LEDGERLENS_TRANSACTIONSERVICE_BASEURL`), which
 is how Container Apps and Kubernetes inject them later.
 
+## CI/CD — Azure Pipelines
+
+[`azure-pipelines.yml`](azure-pipelines.yml). Four stages, because they fail for
+different reasons and which one went red is the first thing worth knowing:
+
+```
+Verify      ./mvnw verify — every test, nothing skipped
+Package     build both images, tag them with the commit, push to ACR
+Deploy      az containerapp update, main branch only
+SmokeTest   ask the running system a question and check the answer
+```
+
+### Tests are not weakened to fit CI
+
+The pipeline runs `./mvnw verify`, the same command as on a laptop. Testcontainers
+starts a real PostgreSQL because the agent has a Docker daemon. A pipeline that
+quietly skips the database tests proves less than it appears to, and the place
+that discovery gets made is production.
+
+Results are published with `PublishTestResults@2`, so a failure is a list of
+test names in the UI rather than something to find in two thousand lines of log.
+Dependencies are cached on a key derived from the POMs, so the download is
+reused by every commit that does not change one.
+
+### Pull requests build; only `main` deploys
+
+```yaml
+condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+```
+
+Without that line every pull request would deploy itself over production.
+
+The deploy is a `deployment` job against an `environment`, not a plain job,
+which makes Azure DevOps record what went out, when, and from which commit.
+
+### The smoke test asks a question rather than trusting the exit code
+
+"Deployed successfully" only means the platform accepted a new revision. Three
+checks turn that into knowledge:
+
+1. **Readiness**, with a long tolerance — both apps scale to zero, so the first
+   request pays for two JVM starts.
+2. **The running image tag equals this build's commit.** Without it a failed
+   rollout is indistinguishable from a successful one, because the old revision
+   answers perfectly well.
+3. **A portfolio id that cannot exist must return `404`.** Only the whole chain
+   produces that: analytics has to reach transaction-service over internal
+   ingress and be told the ledger is empty. If the ledger were unreachable the
+   answer would be `503`; if analytics itself were broken, a `5xx`.
+
+That third check is deliberately not an assertion about seeded data. A smoke
+test that fails whenever someone resets the database is a smoke test people
+learn to ignore.
+
+### Self-hosted agents, and why that is the default
+
+The pipeline defaults to a self-hosted agent, and this is a decision rather than
+a fallback.
+
+| | Microsoft-hosted | Self-hosted |
+|---|---|---|
+| Free grant | requires linking the Azure DevOps organisation to an Azure subscription | **granted automatically** |
+| Limits | 1 job, 60 min each, 1,800 min/month | 1 job, no time limit |
+| Availability | immediate once linked | immediate |
+| Runs when | always | only while the host machine is on |
+
+Microsoft's own spending-limit documentation lists Azure DevOps Services among
+the things that can exhaust a subscription's spending limit. The subscription
+behind this project is a student grant with a hard cap and a live demo on it, so
+the option that does not touch billing wins. `useMicrosoftHostedAgent: true`
+switches it, and the `pool` and `JAVA_HOME` both follow from that one parameter.
+
+Public Azure DevOps projects would once have given ten free hosted jobs with no
+linkage at all. They can no longer be created, and existing ones convert to
+private in 2027.
+
+### What still has to be done by hand
+
+Creating an Azure DevOps organisation, and the two service connections
+(`ledgerlens-acr`, `ledgerlens-azure`), are browser steps: they authorise access
+to the subscription and cannot be scripted from here without handing over
+credentials.
+
 ## Known limitations
 
 Written down rather than left to be discovered. Each is a decision, not an
@@ -892,7 +975,7 @@ oversight — but none of them is defensible while it is invisible.
 | **`GET /api/v1/prices` has no bound** on symbol count or date range, while transactions cap a page at 500. | The asymmetry is unintentional. |
 | **Swagger UI is unauthenticated.** | Deliberate here — a reviewer can open the deployed URL and try the API. Gate it behind a profile for anything real. |
 | **`PUT /api/v1/prices` returns an untyped map**, the one response in the API without a named schema. | A consumer cannot generate a typed client for it. |
-| **Nothing enforces that `docs/openapi/` is current.** `scripts/export-openapi.sh` is run by hand. | The committed spec exists to make API changes reviewable; a stale one quietly does the opposite. A CI step is the natural home. |
+| ~~Nothing enforces that `docs/openapi/` is current.~~ | **Closed.** `OpenApiSpecIsCommittedTest` in both services compares the committed file against what the service publishes and fails the build on drift. It could only be an exact comparison once the `servers` block was declared in configuration instead of inferred from whichever request generated it — which also fixed a spec that claimed `localhost` about a service deployed to Azure. |
 
 ## Deliberately out of scope
 

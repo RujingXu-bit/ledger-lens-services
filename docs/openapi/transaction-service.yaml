@@ -38,8 +38,11 @@ info:
     name: MIT
   version: v1
 servers:
+- url: https://transaction-service.internal.icywater-fe129bae.francecentral.azurecontainerapps.io
+  description: Azure Container Apps — internal ingress. Reachable only from inside
+    the environment; there is deliberately no public address.
 - url: http://localhost:8081
-  description: Generated server url
+  description: Local development
 tags:
 - name: Transactions
   description: The append-only ledger

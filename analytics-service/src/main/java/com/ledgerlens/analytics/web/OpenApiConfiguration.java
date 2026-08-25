@@ -7,6 +7,7 @@ import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.info.License;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.media.StringSchema;
+import io.swagger.v3.oas.models.servers.Server;
 import io.swagger.v3.oas.models.tags.Tag;
 import java.util.List;
 import org.springframework.context.annotation.Bean;
@@ -52,6 +53,11 @@ public class OpenApiConfiguration {
                                 """)
                         .contact(new Contact().name("Ledger Lens").url("https://github.com/"))
                         .license(new License().name("MIT")))
+                .servers(List.of(
+                        new Server()
+                                .url("https://analytics-service.icywater-fe129bae.francecentral.azurecontainerapps.io")
+                                .description("Azure Container Apps — the only public surface of this system"),
+                        new Server().url("http://localhost:8082").description("Local development")))
                 .tags(List.of(new Tag().name("Performance")
                         .description("Return, volatility, maximum drawdown and the Sharpe ratio")))
                 .components(new Components().addSchemas("ProblemDetail", problemDetailSchema()));

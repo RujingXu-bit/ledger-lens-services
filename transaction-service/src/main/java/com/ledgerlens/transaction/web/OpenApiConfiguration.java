@@ -7,6 +7,7 @@ import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.info.License;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.media.StringSchema;
+import io.swagger.v3.oas.models.servers.Server;
 import io.swagger.v3.oas.models.tags.Tag;
 import java.util.List;
 import org.springframework.context.annotation.Bean;
@@ -66,6 +67,16 @@ public class OpenApiConfiguration {
                                 """)
                         .contact(new Contact().name("Ledger Lens").url("https://github.com/"))
                         .license(new License().name("MIT")))
+                // Declared rather than inferred from the incoming request. springdoc
+                // would otherwise report whatever host it was asked on, which makes the
+                // published artifact depend on who generated it - and, once this is
+                // deployed, says localhost about a service that does not live there.
+                .servers(List.of(
+                        new Server()
+                                .url("https://transaction-service.internal.icywater-fe129bae.francecentral.azurecontainerapps.io")
+                                .description("Azure Container Apps — internal ingress. Reachable only from "
+                                        + "inside the environment; there is deliberately no public address."),
+                        new Server().url("http://localhost:8081").description("Local development")))
                 .tags(List.of(
                         new Tag().name("Transactions").description("The append-only ledger"),
                         new Tag().name("Holdings").description("Positions, derived from the ledger on request"),
