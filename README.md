@@ -12,7 +12,7 @@ original project is untouched.
 | Spring Boot | 3.5.16 |
 | Build | Maven multi-module (wrapper committed) |
 | Database | PostgreSQL 16 |
-| Tests | JUnit 5, Testcontainers (real Postgres), WireMock |
+| Tests | JUnit 5, Testcontainers (real Postgres), WireMock, consumer-driven contracts |
 | API errors | RFC 9457 `application/problem+json` |
 | API docs | OpenAPI 3 via springdoc, spec committed to `docs/openapi/` |
 
@@ -240,14 +240,36 @@ What counts as an external flow is a business judgement, not a technicality:
 | Buy / sell | no | internal — cash becomes stock; only the fee is a real cost |
 | Dividend | **no** | this *is* return; netting it out erases the performance it represents |
 
-Time-weighted return was chosen over money-weighted (IRR/XIRR) because the same
-daily return series feeds all four figures — chain-link it for total return,
-take its standard deviation for volatility, accumulate it for drawdown. A
-money-weighted return is a separate root-finding algorithm that feeds only
-itself, and a Sharpe ratio built on it would be meaningless: Sharpe needs a
-periodic return series, which is precisely what the time-weighted method
-produces. XIRR remains a genuinely useful figure and is a candidate for later,
-not a gap in what is here.
+The four risk figures are all built on the time-weighted series, because that
+is what feeds them — chain-link it for total return, take its standard deviation
+for volatility, accumulate it for drawdown. A Sharpe ratio built on a
+money-weighted figure would be meaningless: Sharpe needs a periodic return
+series, and money-weighting produces a single scalar.
+
+#### Both figures are reported, and neither is the headline
+
+`moneyWeightedReturn` is the annualised internal rate of return of the
+investor's own cash flows — XIRR, solved on ACT/365.
+
+| | measures | strips out | use it to |
+|---|---|---|---|
+| Time-weighted | the **portfolio** | when money went in | compare against a benchmark or a manager |
+| Money-weighted | the **investor** | nothing | say what this person actually earned |
+
+They can disagree sharply, and the disagreement is information. Someone
+contributing monthly into a market that fell and then recovered will show a
+money-weighted return well above the time-weighted one, because most of their
+money went in cheap. Reporting one figure without saying which is how
+performance conversations go wrong, so `returnMethod` names the convention and
+both numbers travel together.
+
+**Solved by bisection, not Newton-Raphson.** Newton converges faster when it
+converges, but an NPV curve with sign changes can send it to a nonsensical rate
+or leave it oscillating — and a wrong performance figure that looks plausible is
+the worst possible output. Bisection cannot diverge: given a sign change it
+halves the interval every step. When the flows define no rate at all (money only
+ever paid into a portfolio now worth nothing) the answer is `null`, not an
+invented number.
 
 #### The rest of the decisions
 
@@ -358,9 +380,10 @@ six decimal places, over 179 daily observations:
 | Observations | 179 daily returns |
 | Starting → ending value | 49,997 → 70,712 |
 | **Total return (time-weighted)** | **+15.86%** |
-| Annualised return | +23.03% |
+| Annualised return (time-weighted) | +23.03% |
 | Annualised volatility | 13.81% |
 | Maximum drawdown | −7.02% |
+| Money-weighted return (XIRR) | +23.62% |
 | Sharpe ratio (rf = 0) | 1.67 |
 
 Both columns produced these; the Java figures come from
@@ -420,6 +443,48 @@ the contract rather than an implementation detail.
 Only structure is asserted, never wording. A test that pins prose gets deleted
 the first time it costs somebody a rephrase.
 
+### The consumer-driven contract
+
+`docs/contracts/analytics-service-expects.json` is owned by analytics-service
+and lists exactly what it needs from transaction-service — five fields from the
+ledger, three from the price feed, the query parameters it sends, and the five
+enum values it maps. Nothing more, so the producer stays free to change
+everything else without asking.
+
+It is checked from both ends:
+
+| Where | What it asserts | Why that end |
+|---|---|---|
+| transaction-service's build | the published spec still satisfies every expectation | **breaking a consumer fails the producer's build**, before the change ships |
+| analytics-service's build | the client really does read exactly those fields | the declaration cannot rot into a wish list, in either direction |
+
+The first row is the one that matters. analytics-service already has tests
+proving it copes with what it receives — but those run in the consumer's build,
+and by the time they fail the producer has deployed. Running the check in the
+producer moves the failure to the only moment it can still prevent an outage.
+
+The second test checks both directions on purpose. Over-declaring holds the
+producer to promises nobody depends on, so harmless changes get blocked;
+under-declaring lets the producer's build go green while removing a field this
+client parses, which is the exact failure the exercise exists to prevent.
+
+**Confirmed by breaking it.** A guard nobody has seen fail is a guard nobody
+should trust, so each check was verified against a real mutation:
+
+```
+rename cashAmount -> cashImpact   ->  FAILURE: "/api/v1/transactions response must still carry 'cashAmount'"
+require an absent enum value      ->  FAILURE: "/api/v1/transactions field 'type' must still accept the value 'SPLIT'"
+```
+
+**Honest limitation:** a real setup — Pact, or the spec published as a versioned
+artifact — lets a producer verify against consumers it does not share a
+repository with. This gets the same guarantee inside one repository without a
+new dependency, and stops working the moment the services are split apart.
+
+Writing this contract also found a genuine gap: neither service declared what it
+`produces`, so every response was documented as `*/*`. The fix was to say so in
+the controllers, not to loosen the test.
+
 ### One thing to decide before production
 
 Swagger UI is served unauthenticated. For this project that is the point — a
@@ -439,6 +504,8 @@ Four tiers, fastest first, each failing for one reason:
 | `TransactionApiIntegrationTest` (`@SpringBootTest`) | that the three are wired together | full stack |
 | `PerformanceCalculatorTest`, `ValuationSeriesTest` | the analytics maths and the cash-flow rules | no Spring, 34ms |
 | `PerformanceApiWireMockTest` | the inter-service call, including its failure modes | WireMock stands in for transaction-service |
+| `ConsumerContractTest` | that this service has not broken analytics-service | runs in the **producer's** build |
+| `OpenApiContractTest` | the published API still makes the promises it made | spec assertions, structure only |
 
 Every database test runs against a real PostgreSQL container, never H2. An
 in-memory database that is not the production database only proves the code

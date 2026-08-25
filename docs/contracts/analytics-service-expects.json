@@ -1,0 +1,52 @@
+{
+  "$comment": [
+    "A consumer-driven contract. analytics-service owns this file and declares in it",
+    "exactly what it needs from transaction-service - nothing more, so that the producer",
+    "stays free to change everything else.",
+    "",
+    "It is checked from both sides. transaction-service's build asserts that its published",
+    "OpenAPI description still satisfies every expectation here, so breaking a consumer",
+    "fails the producer's build rather than the consumer's runtime. analytics-service's",
+    "build asserts that its client really does read exactly these fields, so the",
+    "declaration cannot quietly rot into a wish list.",
+    "",
+    "Honest limitation: a real setup (Pact, or a spec published as a versioned artifact)",
+    "lets the producer verify against consumers it does not share a repository with. This",
+    "gets the same guarantee inside one repository, without a new dependency."
+  ],
+  "consumer": "analytics-service",
+  "producer": "transaction-service",
+  "interactions": [
+    {
+      "name": "fetch a portfolio's ledger",
+      "why": "the transactions are the facts every derived figure is built from",
+      "path": "/api/v1/transactions",
+      "method": "get",
+      "requiredQueryParameters": ["portfolioId", "size"],
+      "responseStatus": "200",
+      "requiredFields": {
+        "type": "string",
+        "symbol": "string",
+        "quantity": "number",
+        "cashAmount": "number",
+        "executedAt": "string"
+      },
+      "requiredEnumValues": {
+        "type": ["BUY", "SELL", "DIVIDEND", "DEPOSIT", "WITHDRAWAL"]
+      }
+    },
+    {
+      "name": "fetch closing prices",
+      "why": "positions cannot be valued without them, and the four metrics all need a value series",
+      "path": "/api/v1/prices",
+      "method": "get",
+      "requiredQueryParameters": ["symbols", "from", "to"],
+      "responseStatus": "200",
+      "requiredFields": {
+        "symbol": "string",
+        "priceDate": "string",
+        "closePrice": "number"
+      }
+    }
+  ]
+}

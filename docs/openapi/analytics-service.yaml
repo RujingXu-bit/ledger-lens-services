@@ -96,7 +96,7 @@ paths:
         "200":
           description: Measured. May be a cached result — check `stale`.
           content:
-            '*/*':
+            application/json:
               schema:
                 $ref: "#/components/schemas/PerformanceResponse"
         "404":
@@ -174,8 +174,17 @@ components:
           example: 0.158612
         annualisedReturn:
           type: number
-          description: "Geometric, scaled by 252 trading days"
+          description: "Time-weighted, geometric, scaled by 252 trading days"
           example: 0.230306
+        moneyWeightedReturn:
+          type:
+          - number
+          - "null"
+          description: "Annualised internal rate of return of the investor's own cash\
+            \ flows (XIRR, ACT/365). Measures the investor rather than the portfolio:\
+            \ it reflects when money went in, which `annualisedReturn` deliberately\
+            \ strips out. Null when the cash flows do not define a rate."
+          example: 0.241873
         annualisedVolatility:
           type: number
           description: "Sample standard deviation of daily returns, scaled by sqrt(252)"

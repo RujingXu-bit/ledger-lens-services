@@ -21,6 +21,7 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -39,7 +40,7 @@ import org.springframework.web.bind.annotation.RestController;
  * twice means it happened twice.
  */
 @RestController
-@RequestMapping("/api/v1/prices")
+@RequestMapping(value = "/api/v1/prices", produces = MediaType.APPLICATION_JSON_VALUE)
 @Validated
 @Tag(name = "Prices")
 public class PriceController {
@@ -71,7 +72,7 @@ public class PriceController {
                     content = @Content(mediaType = "application/problem+json",
                             schema = @Schema(ref = "#/components/schemas/ProblemDetail")))
     })
-    @PutMapping
+    @PutMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Integer> upsert(@Valid @RequestBody @NotEmpty @Size(max = MAX_BATCH) List<@Valid PriceUpsertRequest> prices) {
         List<DailyPriceBatchWriter.PriceRow> rows = prices.stream()
                 .map(p -> new DailyPriceBatchWriter.PriceRow(p.symbol(), p.priceDate(), p.closePrice(), p.currency()))

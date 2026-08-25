@@ -49,6 +49,11 @@ public final class PerformanceCalculator {
 
         Double sharpe = volatility == 0.0 ? null : (annualised - riskFreeRate.doubleValue()) / volatility;
 
+        // Reported beside the time-weighted figure, never in place of it. The two
+        // answer different questions and a reader who cannot see both has no way
+        // to tell which one they are looking at.
+        Double moneyWeighted = MoneyWeightedReturn.annualised(series);
+
         return new PerformanceMetrics(
                 series.getFirst().date(),
                 series.getLast().date(),
@@ -57,6 +62,7 @@ public final class PerformanceCalculator {
                 series.getLast().netAssetValue(),
                 rate(totalReturn),
                 rate(annualised),
+                moneyWeighted == null ? null : rate(moneyWeighted),
                 rate(volatility),
                 rate(maxDrawdown(dailyReturns)),
                 sharpe == null ? null : rate(sharpe),

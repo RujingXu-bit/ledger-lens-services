@@ -27,7 +27,13 @@ public record PerformanceResponse(
                 example = "70712.2276") BigDecimal endingValue,
         @Schema(description = "Cumulative time-weighted return as a decimal fraction: 0.158612 is 15.86%",
                 example = "0.158612") BigDecimal totalReturn,
-        @Schema(description = "Geometric, scaled by 252 trading days", example = "0.230306") BigDecimal annualisedReturn,
+        @Schema(description = "Time-weighted, geometric, scaled by 252 trading days", example = "0.230306")
+        BigDecimal annualisedReturn,
+        @Schema(description = "Annualised internal rate of return of the investor's own cash flows "
+                + "(XIRR, ACT/365). Measures the investor rather than the portfolio: it reflects when "
+                + "money went in, which `annualisedReturn` deliberately strips out. Null when the cash "
+                + "flows do not define a rate.", example = "0.241873", nullable = true)
+        BigDecimal moneyWeightedReturn,
         @Schema(description = "Sample standard deviation of daily returns, scaled by sqrt(252)",
                 example = "0.138144") BigDecimal annualisedVolatility,
         @Schema(description = "Worst peak-to-trough fall of the return index. Zero or negative.",
@@ -53,6 +59,7 @@ public record PerformanceResponse(
                 metrics.endingValue(),
                 metrics.totalReturn(),
                 metrics.annualisedReturn(),
+                metrics.moneyWeightedReturn(),
                 metrics.annualisedVolatility(),
                 metrics.maxDrawdown(),
                 metrics.sharpeRatio(),

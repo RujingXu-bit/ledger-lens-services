@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.UUID;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -41,7 +42,7 @@ import org.springframework.web.util.UriComponentsBuilder;
  * a mistaken entry is corrected with a reversing transaction.
  */
 @RestController
-@RequestMapping("/api/v1/transactions")
+@RequestMapping(value = "/api/v1/transactions", produces = MediaType.APPLICATION_JSON_VALUE)
 @Validated
 @Tag(name = "Transactions")
 public class TransactionController {
@@ -94,7 +95,7 @@ public class TransactionController {
                     content = @Content(mediaType = "application/problem+json",
                             schema = @Schema(ref = "#/components/schemas/ProblemDetail")))
     })
-    @PostMapping
+    @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<TransactionResponse> create(@Valid @RequestBody CreateTransactionRequest request,
                                                       UriComponentsBuilder uriBuilder) {
         Transaction saved = service.record(

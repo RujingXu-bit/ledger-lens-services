@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -31,7 +32,7 @@ import org.springframework.web.bind.annotation.RestController;
  * cheaper than making every caller reimplement the fold.
  */
 @RestController
-@RequestMapping("/api/v1/portfolios/{portfolioId}/holdings")
+@RequestMapping(value = "/api/v1/portfolios/{portfolioId}/holdings", produces = MediaType.APPLICATION_JSON_VALUE)
 @Tag(name = "Holdings")
 public class HoldingController {
 

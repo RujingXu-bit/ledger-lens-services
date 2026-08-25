@@ -21,6 +21,36 @@ from collections import defaultdict
 from datetime import date, datetime
 
 TRADING_DAYS_PER_YEAR = 252
+DAYS_PER_YEAR = 365.0
+
+
+def money_weighted_return(series):
+    """XIRR by bisection, matching the Java implementation's conventions.
+
+    Signs are from the investor's side: the opening value and every deposit are
+    outflows, withdrawals and the closing value are inflows. The flow on the
+    first day is skipped because the opening value already contains it.
+    """
+    start = series[0][0]
+    flows = [(0.0, -series[0][1])]
+    for day, _, external in series[1:]:
+        if external:
+            flows.append(((day - start).days / DAYS_PER_YEAR, -external))
+    flows.append((((series[-1][0]) - start).days / DAYS_PER_YEAR, series[-1][1]))
+
+    def npv(rate):
+        return sum(amount / (1 + rate) ** years for years, amount in flows)
+
+    low, high = -0.9999, 100.0
+    if npv(low) * npv(high) > 0:
+        return None
+    for _ in range(200):
+        mid = (low + high) / 2
+        if npv(low) * npv(mid) <= 0:
+            high = mid
+        else:
+            low = mid
+    return (low + high) / 2
 
 
 def get(base_url, path):
@@ -94,6 +124,8 @@ def main():
     print(f"ending value          {series[-1][1]:.4f}")
     print(f"total return          {total:.6f}")
     print(f"annualised return     {annualised:.6f}")
+    mwr = money_weighted_return(series)
+    print(f"money-weighted return {'undefined' if mwr is None else f'{mwr:.6f}'}")
     print(f"annualised volatility {volatility:.6f}")
     print(f"max drawdown          {drawdown:.6f}")
     print(f"sharpe ratio          {(annualised - args.risk_free_rate) / volatility:.6f}"
