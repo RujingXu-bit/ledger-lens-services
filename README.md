@@ -954,12 +954,41 @@ Public Azure DevOps projects would once have given ten free hosted jobs with no
 linkage at all. They can no longer be created, and existing ones convert to
 private in 2027.
 
+### There are no service connections, and that is forced
+
+An Azure Resource Manager service connection authenticates with a service
+principal, which is an app registration. The Entra tenant this subscription
+lives in sets:
+
+```
+allowedToCreateApps: false
+```
+
+for ordinary users, and the account holds no directory role that overrides it —
+while being **Owner of the subscription**. It can create any resource, and no
+identity to manage them with. That is a common university tenant configuration
+and only a tenant administrator can change it.
+
+So the pipeline uses none. The agent is self-hosted on a machine where
+`az login` has already happened, and every Azure step runs as that signed-in
+user. `az acr login` handles the registry; `az containerapp update` handles the
+deploy.
+
+**The cost, stated rather than buried:** the pipeline then acts with a human's
+credentials, and that human is subscription Owner — far more authority than a
+deploy needs. A service principal scoped to `rg-ledgerlens`, or workload
+identity federation, which hands out no long-lived secret at all, is the right
+answer; both are one tenant-admin approval away. It also fails when that login
+expires, which is a worse failure mode than a secret rotating on a schedule.
+
+One incidental benefit: nothing in the pipeline requires the Azure DevOps
+organisation to live in the same tenant as the subscription.
+
 ### What still has to be done by hand
 
-Creating an Azure DevOps organisation, and the two service connections
-(`ledgerlens-acr`, `ledgerlens-azure`), are browser steps: they authorise access
-to the subscription and cannot be scripted from here without handing over
-credentials.
+Creating the Azure DevOps organisation and registering the self-hosted agent are
+browser and terminal steps on the host machine; they authorise access and
+cannot be scripted from here.
 
 ## Known limitations
 

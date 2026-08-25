@@ -15,6 +15,31 @@ pr:
     include:
       - main
 
+# ---------------------------------------------------------------------------
+# On the absence of service connections
+#
+# There are none, and that is forced rather than chosen. An Azure Resource
+# Manager service connection authenticates with a service principal, which is an
+# app registration - and the Entra tenant this subscription lives in sets
+# `allowedToCreateApps: false` for ordinary users. The account is Owner of the
+# subscription and holds no directory role, so it can create any resource and no
+# identity to manage them with. A tenant administrator would have to grant it.
+#
+# The way around it: the agent is self-hosted, on a machine where `az login` has
+# already happened, so every Azure step runs as that signed-in user.
+#
+# The cost of that, stated plainly rather than buried: the pipeline then acts
+# with a human's credentials and this human is subscription Owner, which is far
+# more authority than a deploy needs. A scoped service principal - or workload
+# identity federation, which hands out no long-lived secret at all - is the right
+# answer, and both are one tenant-admin approval away. It also means a pipeline
+# run fails when that login expires, which is a worse failure mode than a secret
+# rotating on a schedule.
+#
+# It has one incidental benefit: nothing here depends on the Azure DevOps
+# organisation living in the same tenant as the subscription.
+# ---------------------------------------------------------------------------
+
 # Which agent runs this.
 #
 # Self-hosted by default, and that is not a fallback - it is the option that
@@ -49,10 +74,6 @@ variables:
   # UI and named here.
   - name: acrLoginServer
     value: acrledgerlens79829b.azurecr.io
-  - name: acrServiceConnection
-    value: ledgerlens-acr
-  - name: azureServiceConnection
-    value: ledgerlens-azure
   - name: resourceGroup
     value: rg-ledgerlens
   # Microsoft-hosted Ubuntu agents expose every installed JDK under a variable
@@ -123,31 +144,39 @@ stages:
           - checkout: self
             fetchDepth: 1
 
+          - script: |
+              set -euo pipefail
+              az account show >/dev/null 2>&1 || {
+                echo "The agent's Azure CLI is not signed in. Run 'az login' on the agent host." >&2
+                exit 1
+              }
+              echo "signed in as: $(az account show --query user.name -o tsv)"
+            displayName: Check the agent can reach Azure
+
           # Both images are built from the repository root, because each
           # Dockerfile needs the parent POM and the Maven wrapper above it.
           #
           # The image is tagged with the commit, never `latest`: a moving tag
           # means "which build is in production" has no answer and a rollback
           # has nothing to roll back to.
-          - task: Docker@2
-            displayName: transaction-service
-            inputs:
-              command: buildAndPush
-              containerRegistry: $(acrServiceConnection)
-              repository: transaction-service
-              Dockerfile: transaction-service/Dockerfile
-              buildContext: $(Build.SourcesDirectory)
-              tags: 0.1.0-$(shortSha)
-
-          - task: Docker@2
-            displayName: analytics-service
-            inputs:
-              command: buildAndPush
-              containerRegistry: $(acrServiceConnection)
-              repository: analytics-service
-              Dockerfile: analytics-service/Dockerfile
-              buildContext: $(Build.SourcesDirectory)
-              tags: 0.1.0-$(shortSha)
+          #
+          # --platform linux/amd64 matters when the agent is an Apple Silicon
+          # machine, which is exactly the case a self-hosted agent creates here.
+          # The Dockerfile pins only its build stage to the host architecture,
+          # so this cross-build costs seconds rather than emulating Maven.
+          - script: |
+              set -euo pipefail
+              az acr login --name ${ACR%%.*}
+              for svc in transaction-service analytics-service; do
+                echo "--- $svc ---"
+                docker buildx build --platform linux/amd64 \
+                  -f "$svc/Dockerfile" \
+                  -t "$ACR/$svc:0.1.0-$(shortSha)" \
+                  --push .
+              done
+            displayName: Build and push both images
+            env:
+              ACR: $(acrLoginServer)
 
   # ---------------------------------------------------------------------------
   - stage: Deploy
@@ -174,31 +203,21 @@ stages:
                 # transaction-service first. analytics depends on it, so if the
                 # ledger fails to start it is better to find out before the
                 # thing that calls it has been replaced too.
-                - task: AzureCLI@2
+                - script: |
+                    set -euo pipefail
+                    az containerapp update \
+                      --name transaction-service \
+                      --resource-group $(resourceGroup) \
+                      --image $(acrLoginServer)/transaction-service:0.1.0-$(shortSha)
                   displayName: transaction-service
-                  inputs:
-                    azureSubscription: $(azureServiceConnection)
-                    scriptType: bash
-                    scriptLocation: inlineScript
-                    inlineScript: |
-                      set -euo pipefail
-                      az containerapp update \
-                        --name transaction-service \
-                        --resource-group $(resourceGroup) \
-                        --image $(acrLoginServer)/transaction-service:0.1.0-$(shortSha)
 
-                - task: AzureCLI@2
+                - script: |
+                    set -euo pipefail
+                    az containerapp update \
+                      --name analytics-service \
+                      --resource-group $(resourceGroup) \
+                      --image $(acrLoginServer)/analytics-service:0.1.0-$(shortSha)
                   displayName: analytics-service
-                  inputs:
-                    azureSubscription: $(azureServiceConnection)
-                    scriptType: bash
-                    scriptLocation: inlineScript
-                    inlineScript: |
-                      set -euo pipefail
-                      az containerapp update \
-                        --name analytics-service \
-                        --resource-group $(resourceGroup) \
-                        --image $(acrLoginServer)/analytics-service:0.1.0-$(shortSha)
 
   # ---------------------------------------------------------------------------
   - stage: SmokeTest
@@ -219,60 +238,55 @@ stages:
           #
           # Generous timeouts on purpose: both apps scale to zero, so the first
           # request pays for two JVM starts.
-          - task: AzureCLI@2
-            displayName: Health, version and a real computation
-            inputs:
-              azureSubscription: $(azureServiceConnection)
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                set -euo pipefail
-                URL="https://$(az containerapp show \
-                  --name analytics-service --resource-group $(resourceGroup) \
-                  --query properties.configuration.ingress.fqdn -o tsv)"
-                echo "target: $URL"
+          - script: |
+              set -euo pipefail
+              URL="https://$(az containerapp show \
+                --name analytics-service --resource-group $(resourceGroup) \
+                --query properties.configuration.ingress.fqdn -o tsv)"
+              echo "target: $URL"
 
-                echo "waiting for readiness (cold start)"
-                for i in $(seq 1 30); do
-                  curl -sf --max-time 60 "$URL/actuator/health/readiness" >/dev/null && break
-                  sleep 10
-                done
-                curl -sf --max-time 60 "$URL/actuator/health/readiness"
+              echo "waiting for readiness (cold start)"
+              for i in $(seq 1 30); do
+                curl -sf --max-time 60 "$URL/actuator/health/readiness" >/dev/null && break
+                sleep 10
+              done
+              curl -sf --max-time 60 "$URL/actuator/health/readiness"
 
-                # The deployed build must be the build this pipeline produced.
-                # Without this check a failed rollout looks identical to a
-                # successful one: the old revision answers happily.
-                echo "verifying the running revision came from this commit"
-                RUNNING=$(az containerapp show --name analytics-service \
-                  --resource-group $(resourceGroup) \
-                  --query "properties.template.containers[0].image" -o tsv)
-                echo "running image: $RUNNING"
-                case "$RUNNING" in
-                  *:0.1.0-$(shortSha)) echo "matches this build" ;;
-                  *) echo "deployed image is not this build" >&2; exit 1 ;;
-                esac
+              # The deployed build must be the build this pipeline produced.
+              # Without this check a failed rollout looks identical to a
+              # successful one: the old revision answers happily.
+              echo "verifying the running revision came from this commit"
+              RUNNING=$(az containerapp show --name analytics-service \
+                --resource-group $(resourceGroup) \
+                --query "properties.template.containers[0].image" -o tsv)
+              echo "running image: $RUNNING"
+              case "$RUNNING" in
+                *:0.1.0-$(shortSha)) echo "matches this build" ;;
+                *) echo "deployed image is not this build" >&2; exit 1 ;;
+              esac
 
-                # Proving the inter-service call works, without depending on any
-                # particular data being present.
-                #
-                # A random portfolio id must come back 404, and only the full
-                # chain can produce that: analytics has to reach
-                # transaction-service over internal ingress and be told the
-                # ledger is empty. If the ledger were unreachable the answer
-                # would be 503, and if analytics itself were broken it would be
-                # 5xx. Asserting on seeded data instead would make this stage
-                # fail whenever someone reset the database - a false alarm that
-                # trains people to ignore the alarm.
-                echo "exercising the call chain with a portfolio that cannot exist"
-                CODE=$(curl -s -o /tmp/probe.json -w '%{http_code}' --max-time 120 \
-                  "$URL/api/v1/portfolios/$(uuidgen | tr 'A-Z' 'a-z')/performance")
-                echo "status: $CODE"
-                cat /tmp/probe.json; echo
-                if [ "$CODE" != "404" ]; then
-                  echo "expected 404 from a healthy chain; a 503 means transaction-service is unreachable" >&2
-                  exit 1
-                fi
-                grep -q '"title":"Portfolio not found"' /tmp/probe.json
+              # Proving the inter-service call works, without depending on any
+              # particular data being present.
+              #
+              # A random portfolio id must come back 404, and only the full
+              # chain can produce that: analytics has to reach
+              # transaction-service over internal ingress and be told the
+              # ledger is empty. If the ledger were unreachable the answer
+              # would be 503, and if analytics itself were broken it would be
+              # 5xx. Asserting on seeded data instead would make this stage
+              # fail whenever someone reset the database - a false alarm that
+              # trains people to ignore the alarm.
+              echo "exercising the call chain with a portfolio that cannot exist"
+              CODE=$(curl -s -o /tmp/probe.json -w '%{http_code}' --max-time 120 \
+                "$URL/api/v1/portfolios/$(uuidgen | tr 'A-Z' 'a-z')/performance")
+              echo "status: $CODE"
+              cat /tmp/probe.json; echo
+              if [ "$CODE" != "404" ]; then
+                echo "expected 404 from a healthy chain; a 503 means transaction-service is unreachable" >&2
+                exit 1
+              fi
+              grep -q '"title":"Portfolio not found"' /tmp/probe.json
 
-                echo
-                echo "smoke test passed"
+              echo
+              echo "smoke test passed"
+            displayName: Health, running version, and a real call through the chain
