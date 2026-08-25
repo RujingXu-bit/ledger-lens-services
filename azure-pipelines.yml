@@ -52,20 +52,15 @@ pr:
 #
 # The trade-off, stated plainly: a self-hosted agent only runs while the machine
 # hosting it is on. Flip this parameter once hosted parallelism is available.
-parameters:
-  - name: agentPool
-    displayName: Self-hosted agent pool
-    type: string
-    default: Default
-
-# A plain pool name, not a conditional. The first version of this file selected
-# between a hosted image and a self-hosted pool with a ${{ if }} block, and
-# Azure Pipelines rejects template expressions in the root `pool` context:
+# Literal, because the root `pool` context accepts no template expression at
+# all - not a conditional, and not a parameter either. Two attempts confirmed
+# it:
 #
-#   A template expression is not allowed in this context
+#   (Line: 66) A template expression is not allowed in this context   # ${{ if }}
+#   (Line: 77) A template expression is not allowed in this context   # ${{ parameters.x }}
 #
-# Supporting both agent types was worth less than a file that runs. To move to
-# Microsoft-hosted agents, replace this block with:
+# Being able to select the agent from a parameter was worth less than a file
+# that runs. To move to Microsoft-hosted agents, replace this block with:
 #
 #   pool:
 #     vmImage: ubuntu-latest
@@ -74,7 +69,7 @@ parameters:
 # Ubuntu images expose each installed JDK that way, and pinning it beats hoping
 # the default happens to be 21.
 pool:
-  name: ${{ parameters.agentPool }}
+  name: Default
 
 variables:
   # Set once, used by every stage. The registry and resource group are the ones
