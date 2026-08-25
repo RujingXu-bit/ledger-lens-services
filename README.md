@@ -4,40 +4,111 @@
 [![Live](https://img.shields.io/badge/live-analytics--service-0078D4)](https://analytics-service.icywater-fe129bae.francecentral.azurecontainerapps.io/swagger-ui.html)
 [![License](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
 
-Portfolio analytics rebuilt as Spring Boot microservices, deployed to Azure and
-described in Kubernetes manifests. The domain — transactions, holdings, return,
-volatility, maximum drawdown, Sharpe ratio — is borrowed from
-Ledger Lens (Python/FastAPI); no code is shared, and the
-original project is untouched.
+Portfolio performance analytics, built as two Java 21 / Spring Boot
+microservices and run in four environments from one image: a laptop, Docker
+Compose, Azure Container Apps, and Kubernetes on kind.
+
+The domain — transactions, holdings, time-weighted return, volatility, maximum
+drawdown, Sharpe ratio — is borrowed from Ledger Lens, a Python/FastAPI product.
+No code is shared and the original is untouched. Rebuilding a domain I already
+knew meant the fortnight went on Spring Boot, Azure and Kubernetes rather than
+on deciding what the product should do.
+
+**Live:** <https://analytics-service.icywater-fe129bae.francecentral.azurecontainerapps.io/swagger-ui.html>
+
+```mermaid
+flowchart LR
+    client([client])
+
+    subgraph pub["public"]
+        analytics["<b>analytics-service</b><br/>stateless · owns no data<br/>return · volatility<br/>drawdown · Sharpe · XIRR"]
+    end
+
+    subgraph priv["no public address, in any environment"]
+        tx["<b>transaction-service</b><br/>system of record<br/>append-only ledger"]
+        db[("PostgreSQL<br/>the only database")]
+    end
+
+    client -->|"GET /performance"| analytics
+    analytics -->|"GET /transactions<br/>GET /prices<br/>timeout · retry · fallback"| tx
+    tx --> db
+
+    style analytics fill:#0b6bcb,stroke:#0b6bcb,color:#fff
+    style tx fill:#1f7a3f,stroke:#1f7a3f,color:#fff
+    style db fill:#5b5b5b,stroke:#5b5b5b,color:#fff
+```
+
+The arrow points one way and never back. `transaction-service` does not know
+`analytics-service` exists, which is what lets analytics be redeployed,
+rewritten or deleted without touching the system of record — and what lets the
+ledger sit behind a boundary with no route in from the internet.
+
+### What a request actually does, including when it goes wrong
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as client
+    participant A as analytics-service
+    participant T as transaction-service
+    participant P as PostgreSQL
+
+    C->>A: GET /portfolios/{id}/performance
+    A->>T: GET /transactions?page=0..n
+    Note over A,T: pages until exhausted — a single<br/>page would silently truncate the ledger
+    T->>P: SELECT ... ORDER BY executed_at, id
+    A->>T: GET /prices?symbols=&from=&to=
+    A->>A: rebuild daily NAV, remove external<br/>cash flows, derive all five figures
+    A-->>C: 200 { "stale": false, "returnMethod": "TIME_WEIGHTED", ... }
+
+    Note over A,T: upstream unreachable
+    A->>T: GET /transactions (attempt 1)
+    T--xA: timeout
+    A->>T: GET /transactions (attempt 2)
+    T--xA: timeout
+    alt a recent result is cached
+        A-->>C: 200 { "stale": true, "computedAt": ... }  Cache-Control: no-store
+    else nothing usable
+        A-->>C: 503 problem+json  Retry-After: 30
+    end
+```
+
+### What this demonstrates, and where to read it
 
 | | |
 |---|---|
-| Java | 21 |
-| Spring Boot | 3.5.16 |
-| Build | Maven multi-module (wrapper committed) |
-| Database | PostgreSQL 16 |
-| Containers | multi-stage Dockerfiles, layered jars, non-root, Docker Compose |
-| Tests | JUnit 5, Testcontainers (real Postgres), WireMock, consumer-driven contracts |
-| API errors | RFC 9457 `application/problem+json` |
-| API docs | OpenAPI 3 via springdoc, spec committed to `docs/openapi/` |
+| Java 21, Spring Boot 3.5, Maven multi-module | [service split](#why-the-split-is-here-and-not-somewhere-else) · [the maths](#the-maths) |
+| Microservice communication, and failing well | [talking to transaction-service](#talking-to-transaction-service) |
+| Documented REST APIs | [the API contract](#the-api-contract) · [`docs/openapi/`](docs/openapi/) |
+| Docker, multi-stage builds, Compose | [containers](#containers) |
+| Azure: ACR, Container Apps, managed PostgreSQL | [ACR](#azure-container-registry) · [Container Apps](#running-on-azure-container-apps) |
+| CI/CD with Azure Pipelines | [the pipeline](#cicd--azure-pipelines) |
+| Kubernetes: deployments, services, config, probes | [on kind](#kubernetes-locally-on-kind) · [`k8s/`](k8s/) |
+| Testing | [97 tests](#testing) · Testcontainers · WireMock · consumer-driven contracts |
+
+Honest framing: this is a personal project, not commercial experience, and no
+employer should read it as equivalent. What it is meant to show is the reasoning
+— every section below records the decision, the alternative, and where a
+measurement contradicted an assumption.
+
+### Contents
+
+- [Architecture](#why-the-split-is-here-and-not-somewhere-else) — why two services, why no shared module
+- [Running it](#running-it)
+- [transaction-service](#transaction-service-api) — the append-only ledger
+- [analytics-service](#analytics-service) — the maths, and the inter-service call
+- [Containers](#containers) · [ACR](#azure-container-registry) · [Container Apps](#running-on-azure-container-apps)
+- [The API contract](#the-api-contract) · [Testing](#testing)
+- [Kubernetes](#kubernetes-locally-on-kind) · [CI/CD](#cicd--azure-pipelines)
+- [What I would do differently at scale](#what-i-would-do-differently-at-scale)
+- [Known limitations](#known-limitations) · [Out of scope](#deliberately-out-of-scope)
 
 ## Services
 
 | Service | Port | Owns | Depends on |
 |---|---|---|---|
-| `transaction-service` | 8081 | transactions + holdings, and the only database in the system | Postgres |
-| `analytics-service` | 8082 | nothing — stateless computation | `transaction-service` over HTTP |
-
-```
-              ┌───────────────────────┐        ┌──────────────────────┐
-  client ───▶ │  analytics-service    │ ─HTTP▶ │ transaction-service  │ ──▶ Postgres
-              │  (stateless, no DB)   │        │  (system of record)  │
-              └───────────────────────┘        └──────────────────────┘
-```
-
-The arrow points one way and never back. `transaction-service` does not know
-`analytics-service` exists, which is what lets analytics be redeployed,
-rewritten or deleted without touching the system of record.
+| `transaction-service` | 8081 | transactions, holdings, prices — and the only database in the system | PostgreSQL |
+| `analytics-service` | 8082 | nothing at all | `transaction-service`, over HTTP |
 
 ## Why the split is here and not somewhere else
 
@@ -1255,6 +1326,145 @@ authenticated.
 Creating the Azure DevOps organisation and registering the self-hosted agent are
 browser and terminal steps on the host machine; they authorise access and
 cannot be scripted from here.
+
+## What I would do differently at scale
+
+Everything below is a decision that is correct for this system and would be
+wrong for a larger one. Listing them is the point: a design is only defensible
+if you can say what would change it.
+
+### The split itself
+
+At this data volume a single Spring Boot application would be the better
+engineering choice, and the two services are justified by the *shape* of the
+difference between them — one owns state and must never lose a write, the other
+is recomputable and CPU-bound — rather than by load. The split starts paying for
+itself when two teams want to release on different days. Until then it is
+network calls, partial failure and eventual consistency bought with cash.
+
+### Holdings, derived on every request
+
+A position is a fold over the transaction log, so it can never disagree with the
+ledger. That costs a scan of one portfolio, which the `(portfolio_id,
+executed_at)` index makes trivial at thousands of rows and painful at tens of
+millions.
+
+The next step is not a `holdings` table maintained by dual writes — that is the
+inconsistency this design exists to avoid. It is a **snapshot**: a periodic
+materialised position as of a date, plus the fold over transactions since. Same
+single source of truth, bounded work.
+
+### One HTTP call per analytics request, fetching the whole history
+
+analytics pages the entire ledger on every request. Fine for a few hundred rows;
+absurd for a portfolio with a decade of trading, and it makes analytics'
+latency a function of the ledger's size.
+
+Two directions, in order of how much they change:
+
+1. **A purpose-built read on the producer** — `GET /portfolios/{id}/valuations`
+   returning the daily NAV series that transaction-service can compute with one
+   SQL aggregate. Cheap to add, keeps the boundary.
+2. **An event stream** — the ledger publishes transactions, analytics maintains
+   its own read model and never asks. This is where Kafka would earn its place,
+   and it is on the out-of-scope list precisely because adopting it for two
+   services and no traffic would be cargo cult.
+
+### The fallback cache is per-instance and in-memory
+
+Bounded LRU in each pod's heap. Two instances warm separately, and a rolling
+restart throws both away — which is exactly what happened during the Kubernetes
+probe experiment, where the degraded response was a `503` rather than a stale
+figure because the pods were new.
+
+At scale that becomes a shared cache (Redis), which also makes the staleness
+tolerance a system-wide property rather than a per-pod accident.
+
+### Scale to zero, and the timeout that follows from it
+
+`--min-replicas 0` keeps this demo inside the free grant and costs a 65-second
+cold start. Anything with users runs at least two replicas across zones, and the
+read timeout goes back from 30s to something a warm service can actually
+promise. The 30s value is a workaround for a deployment choice, not a property
+of the call — which is why it lives in configuration.
+
+### No circuit breaker
+
+Correct at this traffic: a breaker needs enough requests to observe before its
+state means anything, and it is not free to reason about. At scale it earns its
+keep, along with a bulkhead so that slow calls to the ledger cannot consume
+every thread serving analytics.
+
+### One database, no replicas, no pooling
+
+A single B1MS with no high availability and no read replica. At scale:
+zone-redundant HA, a read replica that analytics reads from — its queries are
+pure reads and do not need the primary — and PgBouncer, because a JVM per pod
+times a Hikari pool per JVM exhausts Postgres connection limits long before it
+exhausts anything else.
+
+### Migrations run at application startup
+
+Flyway runs when each pod boots. It is safe — Flyway takes a lock, so twenty
+pods starting at once do not corrupt anything — but it couples deployment to
+migration and serialises the rollout behind whichever pod wins the lock.
+
+At scale, migrations become a separate step (a Kubernetes `Job`, a pipeline
+stage) and must be **backward compatible**, because a rolling update runs old
+and new code against the same schema simultaneously. Adding a nullable column is
+fine; renaming one is a three-deploy expand/contract dance. This design has not
+had to face that yet, and would.
+
+### Secrets are base64, not secret
+
+Container Apps secrets and Kubernetes `Secret` objects are encoded at rest by
+default, not encrypted. At scale: Azure Key Vault behind the Secrets Store CSI
+driver or External Secrets Operator, so the manifest holds a reference rather
+than a value — and better still, **managed identity authenticating to
+PostgreSQL**, so there is no password to store at all. That last one is the
+right answer here too; it needs a change to how the datasource obtains its
+credential, which is the only reason it is not already done.
+
+### No authentication
+
+The network boundary does half the job: the ledger has no public address in any
+environment, so it cannot be written to from the internet. Nothing inside the
+boundary is authenticated, though, so anything that gets in is trusted.
+
+At scale: OAuth2 / OIDC with scopes on the public API, and service-to-service
+identity — mTLS, or a mesh, which is on the out-of-scope list because adopting
+one for two services would be the same cargo cult as Kafka.
+
+### The pipeline runs as a person
+
+The Entra tenant forbids ordinary users from creating app registrations, so the
+pipeline uses the agent's signed-in `az` session — a human who is subscription
+Owner. That is far more authority than a deploy needs and it breaks when the
+login expires. The right answer is workload identity federation scoped to the
+resource group, which issues no long-lived secret at all, and it is one
+tenant-admin approval away.
+
+### Observability stops at health checks
+
+Actuator probes and container logs. That is enough to know whether a service is
+up and nothing about why it is slow.
+
+The highest-value addition is not a metrics stack — it is **distributed
+tracing**. With one inter-service call the request path is still legible by
+reading two log files; with five services it is not, and a trace id propagated
+across the boundary is what turns "analytics is slow" into "the ledger's price
+query is slow". Metrics (Micrometer, Prometheus) come next, and structured JSON
+logs with a correlation id are worth doing before either. All three are on the
+out-of-scope list for this fortnight, and all three would be early on the list
+for the next one.
+
+### API versioning is a path segment and a promise
+
+`/api/v1` from the first commit, and a consumer-driven contract that fails the
+producer's build. That works because both services live in one repository. Split
+them apart and the contract needs publishing — Pact, or the OpenAPI document as
+a versioned artifact — along with a deprecation policy that says how long `v1`
+survives after `v2` ships.
 
 ## Known limitations
 
