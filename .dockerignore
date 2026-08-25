@@ -1,0 +1,15 @@
+# Build output: the image builds its own, and copying a host target/ in would
+# both bloat the context and risk shipping a jar built by a different JDK.
+target/
+*/target/
+
+.git/
+.gitignore
+.idea/
+*.iml
+
+# Nothing here is needed to build or run a service.
+docs/
+scripts/
+*.md
+compose.yaml

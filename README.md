@@ -12,6 +12,7 @@ original project is untouched.
 | Spring Boot | 3.5.16 |
 | Build | Maven multi-module (wrapper committed) |
 | Database | PostgreSQL 16 |
+| Containers | multi-stage Dockerfiles, layered jars, non-root, Docker Compose |
 | Tests | JUnit 5, Testcontainers (real Postgres), WireMock, consumer-driven contracts |
 | API errors | RFC 9457 `application/problem+json` |
 | API docs | OpenAPI 3 via springdoc, spec committed to `docs/openapi/` |
@@ -82,15 +83,24 @@ tests catch drift. The parent POM shares *build configuration* only, never code.
 The modules live in one repository for convenience. Each keeps its own
 Dockerfile and its own pipeline stages, so the boundary stays real.
 
-## Running it locally
+## Running it
 
-Prerequisites: JDK 21, Docker.
+Prerequisites: Docker. (JDK 21 only if you want to run the services outside
+containers.)
+
+Everything, as containers:
 
 ```bash
-docker compose up -d          # Postgres on host port 5433
-./mvnw verify                 # build + tests (Testcontainers needs Docker running)
+docker compose up --build
+```
+
+Or just the database, with the services from an IDE or Maven:
+
+```bash
+docker compose up -d postgres   # Postgres on host port 5433
+./mvnw verify                   # build + tests (Testcontainers needs Docker running)
 ./mvnw -pl transaction-service spring-boot:run   # :8081
-./mvnw -pl analytics-service  spring-boot:run   # :8082
+./mvnw -pl analytics-service  spring-boot:run    # :8082
 ```
 
 Load a demo portfolio — 180 trading days of prices for two funds, an opening
@@ -410,6 +420,92 @@ ones from the script reading the same two endpoints directly.
 Note the first two rows together: the account grew 41% while the investments
 returned 15.9%. The difference is contributions — which is exactly the
 distinction the time-weighted method exists to draw.
+
+## Containers
+
+One multi-stage Dockerfile per service, built from the repository root because
+each needs the parent POM and the Maven wrapper that live above it.
+
+```
+build stage    eclipse-temurin:21-jdk-alpine  — Maven, the JDK, the source
+runtime stage  eclipse-temurin:21-jre-alpine  — a JRE and four layers of application
+```
+
+| | transaction-service | analytics-service |
+|---|---|---|
+| Image | 401 MB | 341 MB |
+| Incremental rebuild after a code change | ~6 s | ~6 s |
+
+### What the multi-stage split buys
+
+**The build toolchain never ships.** Maven, the compiler and the source tree
+stay in the discarded stage. `which javac` in the running image finds nothing —
+a build toolchain on a production container is attack surface that can never be
+used for anything good.
+
+**It runs as `ledgerlens`, not root.** `id` reports `uid=100`. If something ever
+gets execution in there it lands unprivileged, with no package manager and
+nothing writable outside `/tmp`.
+
+### Layered jars, and why the layer order is not arbitrary
+
+The fat jar is split by how often each part changes, using Spring Boot's own
+`jarmode=tools` extractor, and copied in four separate `COPY` steps:
+
+```
+dependencies/           60.5 MB   third-party jars — change when a POM changes
+spring-boot-loader/        696 kB   changes with the Boot version
+snapshot-dependencies/     4.1 kB
+application/               250 kB   this project's classes — change every commit
+```
+
+Copying the whole jar in one step would make every commit push all 60 MB. Split,
+a code change ships **250 kB**. The same reasoning drives the POM-first copy in
+the build stage: dependency download is its own cache layer, invalidated only by
+a POM edit rather than by every source edit.
+
+**Tests do not run in the image build.** They need a Docker daemon for
+Testcontainers, so running them there would mean either Docker-in-Docker or
+quietly weakening them into something that does not test Postgres. They belong
+in the pipeline (day 11).
+
+**`-XX:MaxRAMPercentage=75`, not `-Xmx`.** The JVM reads the container's memory
+limit, so the heap follows whatever the orchestrator grants instead of being
+duplicated in two places that drift apart. With `-XX:+ExitOnOutOfMemoryError` a
+container that exhausts its heap dies and gets replaced rather than limping.
+
+### Compose runs the real images
+
+```bash
+docker compose up --build
+```
+
+Three things in that file are worth reading rather than copying:
+
+**`depends_on: condition: service_healthy`, not just `depends_on`.** Postgres
+accepts a TCP connection seconds before it will accept a query, and Flyway runs
+during startup — without the health condition the first boot is a race the
+service usually loses.
+
+**`jdbc:postgresql://postgres:5432/...`, not `localhost:5433`.** Inside the
+network the service name is the hostname and the port is the container's own.
+The host mapping is for humans.
+
+**`LEDGERLENS_TRANSACTIONSERVICE_BASEURL: http://transaction-service:8081`.**
+This is the same value that becomes an internal FQDN on Container Apps and a
+Kubernetes Service name on day 12 — one environment variable, four
+environments, no code change and no Spring profile. Spring Boot maps
+`SPRING_DATASOURCE_URL` and friends onto the same keys the same way.
+
+Verified end to end with nothing running on the host JVM: the containerised
+analytics-service resolves `transaction-service` to `172.20.0.3`, produces the
+same seven figures as the host run and the Python cross-check, and still
+degrades to `"stale": true` when `docker compose stop transaction-service`
+takes the upstream away.
+
+**Honest note on size:** 341–401 MB is mostly the Temurin JRE base. A `jlink`ed
+runtime or a distroless base would cut it substantially; both add moving parts
+that are not what this fortnight is meant to demonstrate.
 
 ## The API contract
 

@@ -1,6 +1,15 @@
-# Local development dependencies only.
-# The services themselves are containerised on day 8; until then they run from
-# the IDE or `mvn spring-boot:run` against this Postgres.
+# The whole system, as containers.
+#
+#   docker compose up --build          everything
+#   docker compose up -d postgres      just the database, for running the
+#                                      services from an IDE or ./mvnw
+#
+# Note what does NOT appear here: a build step for the services beyond a
+# Dockerfile path, a shared volume of source code, or a JVM debug port. The
+# images this file builds are the images that go to Azure Container Registry on
+# day 9 and into Kubernetes on day 12. A compose file that only works on a
+# laptop teaches nothing about either.
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -20,6 +29,50 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  transaction-service:
+    build:
+      # The build context is the repository root, not the module directory: the
+      # Dockerfile needs the parent POM and the Maven wrapper, which live above.
+      context: .
+      dockerfile: transaction-service/Dockerfile
+    image: ledgerlens/transaction-service:dev
+    environment:
+      # Spring Boot maps SPRING_DATASOURCE_URL onto spring.datasource.url with
+      # no code and no profile. The same mechanism injects these on Container
+      # Apps and in Kubernetes - only the values change.
+      #
+      # `postgres:5432`, not `localhost:5433`: inside the compose network the
+      # service name is the hostname and the port is the container's own.
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ledgerlens
+      SPRING_DATASOURCE_USERNAME: ledgerlens
+      # Fine on a laptop, and nowhere else. Day 10 replaces this with a secret
+      # reference; it is written in the open here so the difference is visible.
+      SPRING_DATASOURCE_PASSWORD: ledgerlens
+    depends_on:
+      postgres:
+        # Not just "started". Postgres accepts a TCP connection seconds before
+        # it will accept a query, and Flyway runs at startup - so without the
+        # health condition the first boot is a race the service usually loses.
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+
+  analytics-service:
+    build:
+      context: .
+      dockerfile: analytics-service/Dockerfile
+    image: ledgerlens/analytics-service:dev
+    environment:
+      # The one value that changes across every environment this project will
+      # run in: localhost on a laptop, a service name here, an internal FQDN on
+      # Container Apps, a Kubernetes Service name on day 12.
+      LEDGERLENS_TRANSACTIONSERVICE_BASEURL: http://transaction-service:8081
+    depends_on:
+      transaction-service:
+        condition: service_healthy
+    ports:
+      - "8082:8082"
 
 volumes:
   postgres-data:
