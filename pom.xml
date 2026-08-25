@@ -44,9 +44,23 @@
     <properties>
         <java.version>21</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- Not managed by Spring Boot's BOM, so it is pinned here rather than
+             in each module - two services documenting themselves with different
+             generators would produce two subtly different specs. -->
+        <springdoc.version>2.9.0</springdoc.version>
     </properties>
 
     <dependencies>
+        <!-- Every service publishes its own OpenAPI description at
+             /v3/api-docs and serves Swagger UI. Generated from the code, so it
+             cannot drift from what the service actually does - which is the
+             failure mode of every hand-maintained API document. -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
+        </dependency>
+
         <!-- Every service exposes health/info endpoints. Kubernetes liveness and
              readiness probes point at these in week 2, so they are not optional. -->
         <dependency>

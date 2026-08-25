@@ -2,6 +2,10 @@ package com.ledgerlens.transaction.web;
 
 import com.ledgerlens.transaction.domain.Holding;
 import com.ledgerlens.transaction.service.TransactionService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -28,6 +32,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping("/api/v1/portfolios/{portfolioId}/holdings")
+@Tag(name = "Holdings")
 public class HoldingController {
 
     private final TransactionService service;
@@ -36,15 +41,32 @@ public class HoldingController {
         this.service = service;
     }
 
+    @Operation(
+            summary = "Positions, derived from the ledger",
+            description = """
+                    There is no holdings table. A position is the net of buys and sells, summed
+                    from the transaction log on every request, so it cannot disagree with the
+                    ledger it comes from. Fully closed positions are omitted — holding zero of
+                    something is not holding it.
+
+                    Read-only by construction: the only way to change a holding is to record a
+                    transaction.
+                    """)
     @GetMapping
     public List<HoldingResponse> holdings(
             @PathVariable UUID portfolioId,
+            @Parameter(description = "Positions as at this instant. Defaults to now. "
+                    + "Any past value works, because the ledger is append-only.",
+                    example = "2026-06-30T23:59:59Z")
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant asOf) {
 
         return service.findHoldings(portfolioId, asOf).stream().map(HoldingResponse::from).toList();
     }
 
-    public record HoldingResponse(String symbol, BigDecimal quantity) {
+    public record HoldingResponse(
+            @Schema(description = "Ticker, upper case", example = "IWDA") String symbol,
+            @Schema(description = "Units held; fractional shares are supported", example = "383.04463100")
+            BigDecimal quantity) {
 
         static HoldingResponse from(Holding h) {
             return new HoldingResponse(h.symbol(), h.quantity());

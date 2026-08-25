@@ -1,0 +1,505 @@
+openapi: 3.1.0
+info:
+  title: Ledger Lens — transaction-service
+  description: |
+    The system of record for portfolio transactions, holdings and closing prices.
+    It owns the only database in the system; every other service asks it over HTTP.
+
+    **Conventions a consumer needs before reading the endpoints:**
+
+    * **The ledger is append-only.** There is no `PUT` and no `DELETE` on a
+      transaction. A mistaken entry is corrected by recording a reversing
+      transaction, which is why any figure derived from the ledger can be
+      recomputed from scratch at any time.
+    * **Money is decimal, not floating point.** Cash carries four decimal
+      places, quantities eight, and values are serialised in plain notation
+      (`1234.5600`, never `1.2345E+3`). Parse them as decimals; a JSON parser
+      that converts numbers to IEEE doubles will silently lose cents.
+    * **`cashAmount` is derived by the server** from quantity, price and fee, and
+      is signed — negative when money leaves the portfolio. It is never accepted
+      from a client.
+    * **Prices are reference data and are upserted.** `PUT /api/v1/prices` is
+      idempotent by design: loading the same trading day twice leaves one row,
+      and a restated price overwrites the previous one.
+    * **Holdings are derived, not stored.** There is no holdings table; a
+      position is a fold over the transaction log, and `?asOf=` answers it as
+      at any past instant.
+    * **Errors are RFC 9457 `application/problem+json`.** `400` means the shape
+      of the payload is wrong; `422` means it was well-formed but described a
+      transaction that cannot exist. Branch on `status` and `type`, never on
+      the prose in `detail`.
+
+    Timestamps are ISO-8601 instants in UTC. Trading dates are ISO calendar
+    dates, because a closing price belongs to a day rather than to a moment.
+  contact:
+    name: Ledger Lens
+    url: https://github.com/
+  license:
+    name: MIT
+  version: v1
+servers:
+- url: http://localhost:8081
+  description: Generated server url
+tags:
+- name: Transactions
+  description: The append-only ledger
+- name: Holdings
+  description: "Positions, derived from the ledger on request"
+- name: Prices
+  description: "Closing prices — reference data, upserted"
+paths:
+  /api/v1/prices:
+    get:
+      tags:
+      - Prices
+      summary: Closing prices for several symbols over a date range
+      description: Both bounds are inclusive. Days with no price are simply absent
+        — the market calendar comes from the data rather than from a hard-coded holiday
+        list.
+      operationId: find
+      parameters:
+      - name: symbols
+        in: query
+        description: Comma-separated tickers
+        required: true
+        schema:
+          type: array
+          items:
+            type: string
+        example: "IWDA,VWCE"
+      - name: from
+        in: query
+        description: "Inclusive, ISO date"
+        required: true
+        schema:
+          type: string
+          format: date
+        example: 2026-01-01
+      - name: to
+        in: query
+        description: "Inclusive, ISO date"
+        required: true
+        schema:
+          type: string
+          format: date
+        example: 2026-08-25
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PriceResponse"
+    put:
+      tags:
+      - Prices
+      summary: Load or restate closing prices
+      description: |
+        `PUT`, not `POST`, and the verb is the contract: this is idempotent. Loading the
+        same trading day twice leaves one row per (symbol, date), and a restated price
+        overwrites the previous one. Price loads get retried, replayed and run twice by
+        a nervous operator, so running one twice must leave the same state.
+
+        Contrast `POST /api/v1/transactions`, which is deliberately not idempotent —
+        posting the same trade twice means it happened twice.
+
+        Up to 5,000 prices per call, written in a single batched statement.
+      operationId: upsert
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/PriceUpsertRequest"
+        required: true
+      responses:
+        "200":
+          description: "`{\"written\": n}` — inserts and updates counted together"
+          content:
+            '*/*':
+              schema:
+                type: object
+                additionalProperties:
+                  type: integer
+                  format: int32
+        "400":
+          description: "An empty list, a batch over the cap, or a malformed price"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+  /api/v1/transactions:
+    get:
+      tags:
+      - Transactions
+      summary: "A portfolio's ledger, oldest first"
+      description: |
+        Ordered by `executedAt`, then by `id` — the tiebreaker matters, because without
+        it two transactions sharing a timestamp come back in whatever order the database
+        finds convenient, which makes paging skip and repeat rows.
+
+        This is the read analytics-service depends on.
+      operationId: list
+      parameters:
+      - name: portfolioId
+        in: query
+        description: Required. There is deliberately no way to read every portfolio
+          at once.
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: from
+        in: query
+        description: "Inclusive lower bound, ISO-8601 instant, e.g. 2026-01-01T00:00:00Z"
+        required: false
+        schema:
+          type: string
+          format: date-time
+        example: 2026-01-01T00:00:00Z
+      - name: to
+        in: query
+        description: "Inclusive upper bound, ISO-8601 instant"
+        required: false
+        schema:
+          type: string
+          format: date-time
+        example: 2026-12-31T23:59:59Z
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 0
+          minimum: 0
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 100
+          exclusiveMinimum: 0
+          maximum: 500
+      responses:
+        "200":
+          description: "The ledger, possibly empty"
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TransactionResponse"
+        "400":
+          description: "`portfolioId` missing, or `size` above the cap of 500"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    post:
+      tags:
+      - Transactions
+      summary: Record a transaction
+      description: |
+        Appends one entry to the ledger. Not idempotent: posting the same body twice
+        records two transactions, because the same trade happening twice is a thing
+        that can happen. Callers needing at-most-once should deduplicate upstream.
+
+        Which fields are required depends on `type`:
+
+        | type | requires | must omit |
+        |---|---|---|
+        | `BUY`, `SELL` | `symbol`, `quantity`, `pricePerUnit` | `amount` |
+        | `DIVIDEND` | `symbol`, `amount` | `quantity`, `pricePerUnit` |
+        | `DEPOSIT`, `WITHDRAWAL` | `amount` | `symbol`, `quantity`, `pricePerUnit` |
+
+        `amount` is always positive; direction is carried by `type`. The signed
+        `cashAmount` on the response is computed by the server and is not accepted
+        as input.
+      operationId: create
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTransactionRequest"
+        required: true
+      responses:
+        "201":
+          description: Recorded. `Location` points at the new resource.
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/TransactionResponse"
+        "400":
+          description: "The payload's shape is wrong — a missing field, a negative\
+            \ quantity. `errors` lists every violation at once."
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "422":
+          description: "Well-formed, but describes a transaction that cannot exist\
+            \ — a BUY with no symbol, a DEPOSIT carrying a quantity."
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+  /api/v1/transactions/{id}:
+    get:
+      tags:
+      - Transactions
+      summary: Fetch one transaction
+      operationId: getById
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        "200":
+          description: Found
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/TransactionResponse"
+        "404":
+          description: No such transaction
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+  /api/v1/portfolios/{portfolioId}/holdings:
+    get:
+      tags:
+      - Holdings
+      summary: "Positions, derived from the ledger"
+      description: |
+        There is no holdings table. A position is the net of buys and sells, summed
+        from the transaction log on every request, so it cannot disagree with the
+        ledger it comes from. Fully closed positions are omitted — holding zero of
+        something is not holding it.
+
+        Read-only by construction: the only way to change a holding is to record a
+        transaction.
+      operationId: holdings
+      parameters:
+      - name: portfolioId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: asOf
+        in: query
+        description: "Positions as at this instant. Defaults to now. Any past value\
+          \ works, because the ledger is append-only."
+        required: false
+        schema:
+          type: string
+          format: date-time
+        example: 2026-06-30T23:59:59Z
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HoldingResponse"
+components:
+  schemas:
+    ProblemDetail:
+      description: RFC 9457 problem detail. `errors` is present only on validation
+        failures.
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Stable identifier for the kind of problem; safe to branch on.
+        title:
+          type: string
+          description: "Short, human-readable summary."
+        status:
+          format: int32
+        detail:
+          type: string
+          description: Explanation for this occurrence. Prose — do not parse.
+        instance:
+          type: string
+          description: The request path that produced it.
+        errors:
+          additionalProperties:
+            type: string
+          description: "Field name to message, one entry per violated constraint."
+    PriceUpsertRequest:
+      type: object
+      properties:
+        symbol:
+          type: string
+          description: Ticker; normalised to upper case
+          example: IWDA
+          pattern: "^[A-Za-z0-9.\\-]{1,16}$"
+        priceDate:
+          type: string
+          format: date
+          description: "The trading day this close belongs to. A date, not an instant\
+            \ — a timestamp would let a timezone conversion move a price to the wrong\
+            \ day."
+          example: 2026-08-25
+        closePrice:
+          type: number
+          description: "Closing price, up to 8 decimal places"
+          example: 98.75
+          minimum: 0
+        currency:
+          type: string
+          description: ISO 4217 code
+          example: EUR
+          pattern: "^[A-Za-z]{3}$"
+      required:
+      - closePrice
+      - currency
+      - priceDate
+      - symbol
+    CreateTransactionRequest:
+      type: object
+      description: A transaction to record. Which fields are required depends on `type`;
+        see the endpoint description.
+      properties:
+        portfolioId:
+          type: string
+          format: uuid
+          example: c88492cf-2ce3-49cc-809d-a83d86d67682
+        type:
+          type: string
+          enum:
+          - BUY
+          - SELL
+          - DIVIDEND
+          - DEPOSIT
+          - WITHDRAWAL
+          example: BUY
+        symbol:
+          type: string
+          description: "Required for BUY, SELL and DIVIDEND; must be absent otherwise.\
+            \ Normalised to upper case."
+          example: IWDA
+          pattern: "^[A-Za-z0-9.\\-]{1,16}$"
+        quantity:
+          type: number
+          description: "Units traded, always positive — direction is carried by `type`.\
+            \ Required for BUY and SELL, must be absent otherwise."
+          example: 10.5
+          minimum: 0
+        pricePerUnit:
+          type: number
+          description: Execution price per unit. Required for BUY and SELL.
+          example: 98.75
+          minimum: 0
+        fee:
+          type: number
+          description: "Commission or withholding. Always a cost: it increases the\
+            \ outlay on a purchase and reduces the proceeds of a sale. Defaults to\
+            \ zero."
+          example: 1.5
+          minimum: 0
+        amount:
+          type: number
+          description: "Gross cash for DIVIDEND, DEPOSIT and WITHDRAWAL, always positive.\
+            \ Must be absent for BUY and SELL, whose cash impact is derived from quantity\
+            \ and price."
+          example: 5000.0
+          minimum: 0
+        currency:
+          type: string
+          description: "ISO 4217 code, normalised to upper case"
+          example: EUR
+          pattern: "^[A-Za-z]{3}$"
+        executedAt:
+          type: string
+          format: date-time
+          description: When the trade executed in the market. Cannot be in the future.
+          example: 2026-01-15T09:00:00Z
+      required:
+      - currency
+      - executedAt
+      - portfolioId
+      - type
+    TransactionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        portfolioId:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum:
+          - BUY
+          - SELL
+          - DIVIDEND
+          - DEPOSIT
+          - WITHDRAWAL
+        symbol:
+          type: string
+          description: Null for DEPOSIT and WITHDRAWAL
+          example: IWDA
+        quantity:
+          type: number
+          description: Null for cash movements
+          example: 10.5
+        pricePerUnit:
+          type: number
+          description: Null for cash movements
+          example: 98.75
+        fee:
+          type: number
+          example: 1.5
+        cashAmount:
+          type: number
+          description: "The signed cash impact, computed by the server: negative when\
+            \ money leaves the portfolio. Summing this column over a portfolio gives\
+            \ its cash balance."
+          example: -1038.375
+        currency:
+          type: string
+        executedAt:
+          type: string
+          format: date-time
+          description: When it executed in the market — supplied by the caller
+        createdAt:
+          type: string
+          format: date-time
+          description: When this service recorded it — never supplied by the caller
+    PriceResponse:
+      type: object
+      properties:
+        symbol:
+          type: string
+        priceDate:
+          type: string
+          format: date
+        closePrice:
+          type: number
+        currency:
+          type: string
+    HoldingResponse:
+      type: object
+      properties:
+        symbol:
+          type: string
+          description: "Ticker, upper case"
+          example: IWDA
+        quantity:
+          type: number
+          description: Units held; fractional shares are supported
+          example: 383.044631

@@ -55,3 +55,17 @@ management:
       enabled: true
     java:
       enabled: true
+
+springdoc:
+  api-docs:
+    # The machine-readable contract. Committed to docs/openapi/ as well, so a
+    # change to the API shows up as a diff in review rather than as a surprise
+    # for whoever calls it.
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+    display-request-duration: true
+  # Actuator is operational surface, not part of the published API.
+  show-actuator: false

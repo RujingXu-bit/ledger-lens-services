@@ -2,6 +2,13 @@ package com.ledgerlens.analytics.web;
 
 import com.ledgerlens.analytics.service.PerformanceResult;
 import com.ledgerlens.analytics.service.PerformanceService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
 import java.math.BigDecimal;
@@ -19,6 +26,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/v1/portfolios/{portfolioId}/performance")
 @Validated
+@Tag(name = "Performance")
 public class PerformanceController {
 
     private final PerformanceService service;
@@ -34,11 +42,49 @@ public class PerformanceController {
      *                     and is echoed back in the response so the assumption behind
      *                     the Sharpe ratio travels with the number.
      */
+    @Operation(
+            summary = "Measure a portfolio's performance over a window",
+            description = """
+                    Fetches the ledger and the price history from transaction-service, rebuilds the
+                    daily net asset value, and derives all four figures from one daily return series.
+
+                    Nothing is stored. Two calls with the same arguments give the same answer unless
+                    a transaction or a price changed in between — or unless the second one was served
+                    from the fallback cache, in which case `stale` is `true`.
+
+                    **Reading the response:** `endingValue` growing faster than `totalReturn` is normal
+                    and is the point of the time-weighted method — the difference is money paid in.
+                    """)
+    @ApiResponses({
+            @ApiResponse(responseCode = "200",
+                    description = "Measured. May be a cached result — check `stale`."),
+            @ApiResponse(responseCode = "404",
+                    description = "The portfolio has no transactions. A definite answer, never returned "
+                            + "because an upstream was unreachable.",
+                    content = @Content(mediaType = "application/problem+json",
+                            schema = @Schema(ref = "#/components/schemas/ProblemDetail"))),
+            @ApiResponse(responseCode = "422",
+                    description = "Not enough valuation points to compute a statistic, or a position "
+                            + "held on a day with no known price.",
+                    content = @Content(mediaType = "application/problem+json",
+                            schema = @Schema(ref = "#/components/schemas/ProblemDetail"))),
+            @ApiResponse(responseCode = "503",
+                    description = "transaction-service could not be reached and no recent result was "
+                            + "available to fall back on. Carries `Retry-After`.",
+                    content = @Content(mediaType = "application/problem+json",
+                            schema = @Schema(ref = "#/components/schemas/ProblemDetail")))
+    })
     @GetMapping
     public ResponseEntity<PerformanceResponse> performance(
             @PathVariable UUID portfolioId,
+            @Parameter(description = "Inclusive start. Defaults to the date of the first transaction.",
+                    example = "2026-01-01")
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @Parameter(description = "Inclusive end. Defaults to today.", example = "2026-08-25")
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
+            @Parameter(description = "Annualised, as a decimal fraction: 0.025 is 2.5%. Defaults to zero, "
+                    + "and is echoed back so the assumption travels with the Sharpe ratio.",
+                    example = "0.025")
             @RequestParam(defaultValue = "0")
             @DecimalMin(value = "-0.1") @DecimalMax(value = "1.0") BigDecimal riskFreeRate) {
 
