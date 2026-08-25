@@ -1,9 +1,19 @@
 spring:
+  lifecycle:
+    # How long graceful shutdown may take before the JVM stops regardless. Must
+    # stay comfortably under the pod's terminationGracePeriodSeconds, or
+    # Kubernetes SIGKILLs the process mid-drain and the setting achieves nothing.
+    timeout-per-shutdown-phase: 20s
+
   application:
     name: analytics-service
 
 server:
   port: 8082
+  # Finish in-flight requests instead of dropping them when the container is
+  # asked to stop. Without this, SIGTERM closes the connector immediately and a
+  # rolling update loses whatever was mid-request.
+  shutdown: graceful
 
 # Where transaction-service lives. localhost for now; a compose service name on
 # day 8, a Container Apps internal FQDN on day 10, a Kubernetes Service name on
@@ -38,6 +48,16 @@ management:
       probes:
         enabled: true
       show-details: when-authorized
+      # Left at the default on purpose, which is the interesting half of the
+      # pair. This service could report itself not-ready when
+      # transaction-service is unreachable, and that would be wrong: it can
+      # still serve a clearly-labelled cached result, and an honest 503 when it
+      # cannot. Making it unready would remove it from its own Service and
+      # convert one service's outage into two - the exact failure the timeouts
+      # and the fallback cache exist to prevent.
+      #
+      # Readiness means "can I do my job", and this service's job includes
+      # degrading well.
   info:
     # Surfaces the build version and Git-free build timestamp at /actuator/info.
     build:

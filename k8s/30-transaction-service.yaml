@@ -1,0 +1,200 @@
+# The system of record. Note what is absent: any way in from outside the
+# cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: transaction-service
+  namespace: ledgerlens
+spec:
+  # ClusterIP, the default, stated explicitly because it is a decision rather
+  # than an accident. This is the same boundary Container Apps' internal
+  # ingress draws: reachable by analytics-service, unreachable from the
+  # internet. A NodePort here would quietly undo it.
+  type: ClusterIP
+  selector:
+    app: transaction-service
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transaction-service
+  namespace: ledgerlens
+  labels:
+    app: transaction-service
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: transaction-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the desired count during a rollout: bring a new pod up,
+      # wait for its readiness probe, then take an old one down. With the
+      # default maxUnavailable of 25% a two-replica service spends part of every
+      # deploy at half capacity for no reason.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: transaction-service
+    spec:
+      securityContext:
+        # The image already declares USER ledgerlens; this makes the cluster
+        # refuse to run it if that ever changes, rather than trusting it.
+        runAsNonRoot: true
+        runAsUser: 100
+        seccompProfile:
+          type: RuntimeDefault
+      # Kubernetes has no `depends_on`. It starts every pod at once and lets
+      # them sort it out, so on a cold cluster this container came up before
+      # Postgres was accepting connections, Flyway failed, the Spring context
+      # failed, the JVM exited 1, and the pod restarted twice before the
+      # database was ready:
+      #
+      #   Unable to obtain connection from database:
+      #   Connection to postgres:5432 refused
+      #
+      # It reached a working state on its own - that is what the restart policy
+      # is for - but "eventually correct after two crashes" reads as a broken
+      # deployment in every dashboard, and it delays the rollout by the backoff.
+      #
+      # No probe can fix this: the process exits by itself rather than being
+      # killed, so there is nothing for a startup probe to be patient about. An
+      # init container is the mechanism Kubernetes offers - the main container
+      # is not started until this one exits 0. It is the same guarantee
+      # Compose's `condition: service_healthy` gives, arrived at differently.
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h postgres -p 5432 -U ledgerlens -d ledgerlens; do
+                echo "postgres is not accepting connections yet; waiting"
+                sleep 2
+              done
+              echo "postgres is ready"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+
+      containers:
+        - name: transaction-service
+          image: ledgerlens/transaction-service:dev
+          # The image is side-loaded into the kind nodes with
+          # `kind load docker-image`, so there is no registry to pull from and
+          # Always would fail.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          envFrom:
+            - configMapRef:
+                name: ledgerlens-config
+          env:
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ledgerlens-db
+                  key: POSTGRES_PASSWORD
+
+          # The three probes, and they answer three different questions.
+          #
+          # Startup: "has it finished booting?" Until this passes the other two
+          # are not consulted at all. This is the probe whose absence let
+          # Container Apps kill the JVM mid-start in a loop on day 10 - a
+          # liveness probe with nothing in front of it restarts a slow starter
+          # forever. 30 x 5s buys 150 seconds, which is generous for a JVM that
+          # also runs Flyway against a database that may itself still be coming
+          # up.
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+
+          # Readiness: "should this pod receive traffic?" Failing it removes the
+          # pod from the Service's endpoints without restarting anything, which
+          # is exactly right when the database is briefly unreachable.
+          #
+          # That only works because the service's readiness group was changed to
+          # include `db`. Spring Boot's default group is readinessState alone,
+          # and with it this probe stayed green through two minutes of Postgres
+          # being scaled to zero - Kubernetes happily routing traffic to pods
+          # that could not serve a single request. A probe that cannot fail is
+          # decoration.
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # Liveness: "is this process wedged?" Failing it restarts the
+          # container, so it must only check that the JVM is answering at all.
+          # Pointing liveness at a check that includes the database would turn a
+          # database blip into a restart storm across every replica.
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              # No CPU limit on purpose: a JVM throttled by a CFS quota during
+              # startup takes far longer to warm up, and the request already
+              # guarantees a share. The memory limit does matter - the image
+              # runs with -XX:MaxRAMPercentage=75, so the heap sizes itself from
+              # this number.
+              memory: 1Gi
+
+          # Endpoint removal and container termination are not ordered:
+          # kubelet sends SIGTERM at the same moment the endpoint controller
+          # starts telling every node to stop routing here, and a node that has
+          # not caught up yet will send a request to a container already
+          # shutting down. Measured on a rolling restart of two replicas: one
+          # connection failure in thirty-two requests.
+          #
+          # This sleep gives the removal time to propagate before the process is
+          # asked to stop. It does nothing else, and that is the whole point.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "8"]
+
+          volumeMounts:
+            # readOnlyRootFilesystem is on, and the JVM still needs somewhere to
+            # write - temp files, heap dumps, Tomcat's work directory.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

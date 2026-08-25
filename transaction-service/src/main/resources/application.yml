@@ -1,4 +1,10 @@
 spring:
+  lifecycle:
+    # How long graceful shutdown may take before the JVM stops regardless. Must
+    # stay comfortably under the pod's terminationGracePeriodSeconds, or
+    # Kubernetes SIGKILLs the process mid-drain and the setting achieves nothing.
+    timeout-per-shutdown-phase: 20s
+
   application:
     name: transaction-service
 
@@ -36,6 +42,10 @@ spring:
 
 server:
   port: 8081
+  # Finish in-flight requests instead of dropping them when the container is
+  # asked to stop. Without this, SIGTERM closes the connector immediately and a
+  # rolling update loses whatever was mid-request.
+  shutdown: graceful
 
 management:
   endpoints:
@@ -49,6 +59,19 @@ management:
       probes:
         enabled: true
       show-details: when-authorized
+      group:
+        readiness:
+          # `db` added to the default readinessState. Without it the readiness
+          # probe answers "the Spring context started", not "this pod can do its
+          # job" - measured: with Postgres scaled to zero for two minutes, both
+          # replicas stayed Ready and Kubernetes kept routing requests to pods
+          # that could not serve one.
+          #
+          # Deliberately readiness and not liveness. Losing the database should
+          # take a pod out of the Service until it recovers; restarting the JVM
+          # would not bring Postgres back, and doing it across every replica at
+          # once turns a database blip into an outage.
+          include: readinessState,db
   info:
     # Surfaces the build version and Git-free build timestamp at /actuator/info.
     build:

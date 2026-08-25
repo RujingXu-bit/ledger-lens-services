@@ -1,0 +1,13 @@
+# Everything lives in one namespace, so the whole system is created and
+# destroyed as a unit:
+#
+#   kubectl apply -f k8s/
+#   kubectl delete namespace ledgerlens
+#
+# The default namespace is where things go to be forgotten about.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ledgerlens
+  labels:
+    app.kubernetes.io/part-of: ledger-lens-services

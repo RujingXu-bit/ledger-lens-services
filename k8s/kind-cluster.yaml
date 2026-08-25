@@ -1,0 +1,19 @@
+# The cluster this project runs on locally.
+#
+#   kind create cluster --config k8s/kind-cluster.yaml
+#
+# One control-plane node and two workers: enough for a Deployment's replicas to
+# actually land on different machines, which a single-node cluster hides.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ledgerlens
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # analytics-service's NodePort, published to the host. Without this the
+      # cluster is reachable only from inside Docker's network.
+      - containerPort: 30082
+        hostPort: 8090
+        protocol: TCP
+  - role: worker
+  - role: worker

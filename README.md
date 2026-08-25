@@ -882,6 +882,180 @@ development defaults only; Spring Boot maps environment variables onto the same
 keys (`SPRING_DATASOURCE_URL`, `LEDGERLENS_TRANSACTIONSERVICE_BASEURL`), which
 is how Container Apps and Kubernetes inject them later.
 
+## Kubernetes, locally on kind
+
+```bash
+kind create cluster --config k8s/kind-cluster.yaml
+./mvnw -DskipTests package
+docker build -t ledgerlens/transaction-service:dev -f transaction-service/Dockerfile .
+docker build -t ledgerlens/analytics-service:dev   -f analytics-service/Dockerfile .
+kind load docker-image ledgerlens/transaction-service:dev ledgerlens/analytics-service:dev --name ledgerlens
+kubectl apply -f k8s/
+```
+
+Three nodes, so a Deployment's replicas land on different machines rather than
+all sharing one — a single-node cluster hides scheduling entirely. Images are
+side-loaded with `kind load`; no registry is involved, which is also why every
+container specifies `imagePullPolicy: IfNotPresent`.
+
+The kind nodes are arm64 on this laptop and Azure runs amd64. Same Dockerfile
+for both: `--platform=$BUILDPLATFORM` on the build stage means the jar is built
+natively either way and only the runtime base follows the target.
+
+### The fourth environment, and still one image
+
+| | Compose | Container Apps | Kubernetes |
+|---|---|---|---|
+| Database host | `postgres:5432` | managed FQDN + `sslmode=require` | `postgres:5432` (Service DNS) |
+| Password | plain text in the file | Container Apps secret | `Secret` → `secretKeyRef` |
+| Upstream URL | `http://transaction-service:8081` | internal FQDN | `http://transaction-service:8081` |
+| Not public | — | internal ingress | `ClusterIP`, no `nodePort` |
+
+`ConfigMap` holds what is not secret and `Secret` holds what is, injected with
+`envFrom` and `secretKeyRef`. No profile, no rebuild, no code aware of any of it.
+
+`analytics-service` is a `NodePort` mapped by kind to `localhost:8090`. On a real
+cluster it would be an Ingress; NodePort keeps the demonstration to one moving
+part instead of also installing an ingress controller.
+
+### Three probes, three different questions
+
+| Probe | Question | Failing it means |
+|---|---|---|
+| **Startup** | has it finished booting? | nothing yet — the other two are not consulted |
+| **Readiness** | should this pod get traffic? | removed from the Service, **not** restarted |
+| **Liveness** | is this process wedged? | restarted |
+
+The startup probe is the one whose absence let Container Apps kill the JVM
+mid-boot in a loop on day 10. 30 × 5s buys 150 seconds, which a JVM running
+Flyway against a database that may itself still be starting can need.
+
+#### The readiness probe was decoration until it was measured
+
+The manifest originally carried a comment claiming Spring's readiness group
+turns DOWN when the datasource does. It does not. The default group is
+`readinessState` alone, and the measurement was unambiguous:
+
+```
+postgres scaled to 0
+t= 10s  READY: 1/1 1/1   endpoints ready: true true
+...
+t=120s  READY: 1/1 1/1   endpoints ready: true true
+```
+
+Two minutes of Kubernetes routing traffic to pods that could not serve a single
+request, with a green probe. The fix is one config key —
+`management.endpoint.health.group.readiness.include: readinessState,db` — and
+the same experiment then gives:
+
+```
+t= 30s  READY: 0/1 1/1   restarts: 0 0   endpoints ready: false false
+        -> readiness went DOWN, and the pods were NOT restarted
+```
+
+Then, when Postgres came back, recovery in about twenty seconds with the restart
+count still zero. **A probe that cannot fail is decoration.**
+
+#### analytics-service deliberately does the opposite
+
+Its readiness does **not** include the upstream, and that asymmetry is the point.
+Measured during the same outage:
+
+```
+analytics pods           READY 1/1   restarts=0
+its own health           {"status":"UP"}
+a request through it     HTTP/1.1 503  {"title":"Upstream unavailable", ...}
+```
+
+It could have reported itself not-ready when transaction-service was
+unreachable. That would have removed it from its own Service and turned one
+service's outage into two — the exact failure the timeouts and the fallback
+cache exist to prevent. Readiness means "can I do my job", and this service's
+job includes degrading well.
+
+### Kubernetes has no `depends_on`
+
+Everything starts at once. On a cold cluster the ledger came up before Postgres
+was accepting connections:
+
+```
+Unable to obtain connection from database: Connection to postgres:5432 refused
+...
+transaction-service   1/1   Running   2 (20s ago)
+```
+
+It reached a working state on its own — that is what the restart policy is for —
+but "eventually correct after two crashes" reads as a broken deployment in every
+dashboard, and the backoff delays the rollout. No probe helps: the process exits
+by itself rather than being killed, so there is nothing to be patient about.
+
+An `initContainer` running `pg_isready` in a loop is the mechanism Kubernetes
+offers, and it is the same guarantee Compose's `condition: service_healthy`
+gives, arrived at differently. Restarts after: **0**.
+
+### What `emptyDir` taught, unintentionally
+
+Deleting the Postgres pod during the probe experiment destroyed its volume. The
+replacement came up with an empty database, the still-running ledger pods simply
+reconnected to it, and every write started failing:
+
+```
+tables in the database: 0
+PUT /api/v1/prices -> 500
+```
+
+Flyway runs at application startup, so a database recreated underneath a running
+application never gets its schema back. Restarting the deployment fixed it in
+seconds.
+
+The sharper lesson is about the probe: **readiness stayed green throughout**.
+Spring's `db` indicator validates a connection, and a connection to an empty
+database is perfectly valid. A connectivity check is not a correctness check,
+and no probe here would have caught this.
+
+### Rolling updates, and the request that got dropped
+
+`maxUnavailable: 0` brings a new pod to readiness before taking an old one down.
+Measured during a rolling restart of two replicas, polling throughout:
+
+```
+before:  31 x 200, 1 x connection failure   (32 requests)
+```
+
+Endpoint removal and `SIGTERM` are not ordered: kubelet stops the container at
+the same moment the endpoint controller starts telling every node to stop
+routing to it, and a node that has not caught up sends a request to a container
+already shutting down. Two changes close it — an 8-second `preStop` sleep so
+removal propagates, and `server.shutdown: graceful` so whatever is still in
+flight completes, with `terminationGracePeriodSeconds: 45` to leave room for
+both.
+
+```
+after:   56 x 200, 0 failures               (56 requests)
+```
+
+### Hardening
+
+`runAsNonRoot` with `runAsUser: 100`, `allowPrivilegeEscalation: false`, all
+capabilities dropped, `readOnlyRootFilesystem: true` with an `emptyDir` at
+`/tmp` for the JVM's scratch space, and `seccompProfile: RuntimeDefault`. The
+image already declares a non-root `USER`; the pod spec makes the cluster refuse
+to run it if that ever changes rather than trusting it.
+
+No CPU limit, on purpose: a JVM throttled by a CFS quota during startup takes
+far longer to warm up, and the CPU request already guarantees a share. The
+memory limit does matter — the image runs with `-XX:MaxRAMPercentage=75`, so the
+heap sizes itself from it.
+
+### The same seven figures, now from four places
+
+```
+local JVM    ┐
+Python       ├─ 0.158612  0.230306  0.236190  0.138144  -0.070159  1.667139
+Azure        │
+Kubernetes   ┘
+```
+
 ## CI/CD — Azure Pipelines
 
 [`azure-pipelines.yml`](azure-pipelines.yml). Four stages, because they fail for

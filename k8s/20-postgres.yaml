@@ -1,0 +1,87 @@
+# Postgres in the cluster, for local development only.
+#
+# On Azure this is a managed Flexible Server with automated backups and
+# point-in-time restore. Here it is a single pod with an emptyDir, and the
+# distinction is deliberate: a database in a container with no persistence is
+# fine for a laptop and wrong for anything else. Running a real database on
+# Kubernetes is an operator's job (CloudNativePG, Zalando) and a different
+# fortnight.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: ledgerlens
+spec:
+  # Headless is not needed here, but ClusterIP is: no NodePort, no ingress. The
+  # database is reachable from inside the cluster and nowhere else.
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: ledgerlens
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  # Recreate, not RollingUpdate: two Postgres pods writing the same volume is
+  # not a rollout, it is corruption. The default strategy would try exactly that.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: ledgerlens
+            - name: POSTGRES_USER
+              value: ledgerlens
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ledgerlens-db
+                  key: POSTGRES_PASSWORD
+            # Postgres refuses to initialise into a non-empty directory, and a
+            # mounted volume is never empty - it has lost+found. A subdirectory
+            # is the standard way round it.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "ledgerlens", "-d", "ledgerlens"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "ledgerlens", "-d", "ledgerlens"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        # emptyDir: the data lives as long as the pod does. Restarting the pod
+        # loses the ledger, which is acceptable here only because every figure
+        # in this system is reproducible from a seed script.
+        - name: data
+          emptyDir: {}

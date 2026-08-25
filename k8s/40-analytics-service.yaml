@@ -1,0 +1,112 @@
+# The only thing in this namespace reachable from outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-service
+  namespace: ledgerlens
+spec:
+  # NodePort, because kind maps a node port through to the host. On a real
+  # cluster this would be an Ingress or a LoadBalancer; NodePort keeps the
+  # demonstration to one moving part instead of also installing an ingress
+  # controller.
+  type: NodePort
+  selector:
+    app: analytics-service
+  ports:
+    - name: http
+      port: 8082
+      targetPort: http
+      nodePort: 30082
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-service
+  namespace: ledgerlens
+  labels:
+    app: analytics-service
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: analytics-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: analytics-service
+    spec:
+      # 8s preStop + up to 20s of graceful drain, with room to spare. The
+      # default 30s would cut the drain short.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: analytics-service
+          image: ledgerlens/analytics-service:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8082
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          envFrom:
+            - configMapRef:
+                name: ledgerlens-config
+          # No secret here, and nothing to inject: this service owns no data and
+          # holds no credentials. The manifest is shorter than the ledger's for
+          # the same reason the Dockerfile has fewer dependencies.
+
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+
+          # Same reasoning as transaction-service: endpoint removal and SIGTERM
+          # are not ordered, so a node that has not yet caught up can route a
+          # request to a container that is already shutting down. The sleep
+          # gives removal time to propagate; `server.shutdown: graceful` then
+          # drains whatever is still in flight.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "8"]
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

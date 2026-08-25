@@ -1,0 +1,45 @@
+# Non-secret configuration. The same environment variables the Compose file and
+# Container Apps set - Spring Boot maps SPRING_DATASOURCE_URL and friends onto
+# its own keys with no code and no profile, which is the whole reason one image
+# runs unchanged in four places.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ledgerlens-config
+  namespace: ledgerlens
+data:
+  # `postgres` is the Service name, resolved by cluster DNS to
+  # postgres.ledgerlens.svc.cluster.local. Same shape as Compose's service name
+  # and Container Apps' internal FQDN; only the value differs.
+  SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ledgerlens
+  SPRING_DATASOURCE_USERNAME: ledgerlens
+
+  # The one value that has now been four different things across four
+  # environments, with no code change between them.
+  LEDGERLENS_TRANSACTIONSERVICE_BASEURL: http://transaction-service:8081
+
+  # Kubernetes starts pods in parallel and does not wait for one Deployment
+  # before starting another, so analytics can be up before the ledger is. The
+  # bounded retry and the short timeout handle that; this gives them room for a
+  # cold JVM without being long enough to park threads on a dead upstream.
+  LEDGERLENS_TRANSACTIONSERVICE_READTIMEOUT: 20s
+  LEDGERLENS_TRANSACTIONSERVICE_CONNECTTIMEOUT: 5s
+---
+# A Secret, separately, because it is a different kind of thing - even though
+# Kubernetes Secrets are only base64-encoded at rest by default, which is
+# encoding rather than encryption.
+#
+# This value is a local development password and nothing else. Committing a
+# real one would be the point at which this file became a liability: the
+# production answer is an external secret store (Azure Key Vault via the Secrets
+# Store CSI driver, or External Secrets Operator) with only a reference here.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ledgerlens-db
+  namespace: ledgerlens
+type: Opaque
+stringData:
+  # stringData rather than data: Kubernetes does the base64 encoding, so what is
+  # written here is readable and reviewable instead of a blob nobody checks.
+  POSTGRES_PASSWORD: ledgerlens
