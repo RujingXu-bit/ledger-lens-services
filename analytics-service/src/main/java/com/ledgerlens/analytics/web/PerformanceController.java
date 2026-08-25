@@ -65,8 +65,14 @@ public class PerformanceController {
                     content = @Content(mediaType = "application/problem+json",
                             schema = @Schema(ref = "#/components/schemas/ProblemDetail"))),
             @ApiResponse(responseCode = "422",
-                    description = "Not enough valuation points to compute a statistic, or a position "
-                            + "held on a day with no known price.",
+                    description = "Not enough valuation points to compute a statistic, a position held on "
+                            + "a day with no known price, or a ledger too large to read in one request.",
+                    content = @Content(mediaType = "application/problem+json",
+                            schema = @Schema(ref = "#/components/schemas/ProblemDetail"))),
+            @ApiResponse(responseCode = "502",
+                    description = "transaction-service rejected this service's request — a misconfigured "
+                            + "base URL, a parameter it no longer accepts, or missing credentials. A fault "
+                            + "in the integration, not in the request you made. Retrying will not help.",
                     content = @Content(mediaType = "application/problem+json",
                             schema = @Schema(ref = "#/components/schemas/ProblemDetail"))),
             @ApiResponse(responseCode = "503",

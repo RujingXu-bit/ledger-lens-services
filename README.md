@@ -312,6 +312,15 @@ timeout inherits the operating system's, which is minutes. Under load that
 parks every thread in this service on a dead upstream, and one service's outage
 becomes two. Connect 2s, read 5s, both configurable.
 
+**Reading all of the data, or none of it.** The ledger is read page by page
+until it is exhausted. Asking for one page and using whatever came back is the
+trap: transaction-service caps a page at 500, so a busier portfolio would have
+been measured on a fragment of its own ledger with nothing in the response
+saying so. Paging is safe because the ledger is ordered by
+`(executedAt, id)` — the tiebreaker means a page boundary cannot skip or repeat
+a row. Past a backstop of 50,000 transactions the request is refused with a
+`422` rather than answered from part of the data.
+
 **A retry small enough to be safe.** Both calls are `GET`, so repeating them is
 harmless, and one immediate retry absorbs the common case of a connection
 dropped during a rolling deploy. It stops at two attempts: retries are load
@@ -346,8 +355,16 @@ one recomputation, and no instance needs to agree with any other.
 |---|---|
 | timed out, refused, or 5xx — cached result available | `200` with `"stale": true` |
 | timed out, refused, or 5xx — nothing usable cached | `503` + `Retry-After`, upstream's message not echoed |
+| answered `4xx` — a definite "your request is wrong" | `502`, never retried, never served from cache |
 | returned an empty ledger | `404` — a definite answer that there is nothing to measure |
-| returned too few valuation points | `422` |
+| returned too few valuation points, or too large a ledger | `422` |
+
+`502` and `503` are split on purpose, and the split is for whoever is on call:
+`503` says the upstream is down, wait. `502` says the upstream is healthy and
+this service asked it the wrong question — go and look at the integration,
+because retrying will not help. A `4xx` is deterministic, so it is not retried
+and never falls back on a cached figure: that would hide a bug rather than
+survive an outage.
 
 The first two rows are the distinction that matters: `503` says nothing is wrong
 with *this* service, so retrying may work — unlike a `500`, which says it will
@@ -535,6 +552,21 @@ No environment-specific value is hard-coded. `application.yml` holds local
 development defaults only; Spring Boot maps environment variables onto the same
 keys (`SPRING_DATASOURCE_URL`, `LEDGERLENS_TRANSACTIONSERVICE_BASEURL`), which
 is how Container Apps and Kubernetes inject them later.
+
+## Known limitations
+
+Written down rather than left to be discovered. Each is a decision, not an
+oversight — but none of them is defensible while it is invisible.
+
+| | |
+|---|---|
+| **No authentication.** Both services are open. Anyone reachable can record transactions and restate prices. | Acceptable while it runs on a laptop; a decision has to be taken before it is deployed. |
+| **Selling more than you hold is allowed**, and produces a negative holding. | Sufficient-quantity is an invariant across the whole ledger, not within one transaction, so enforcing it means reading aggregate state on every write. Not implemented; short positions are therefore representable. |
+| **A cash-only portfolio cannot be measured.** With no securities there are no prices, and the valuation calendar is derived from price data, so there are no valuation points. | Fails loudly with a `422`, but the message says "not enough data" rather than naming the real cause. |
+| **`GET /api/v1/prices` has no bound** on symbol count or date range, while transactions cap a page at 500. | The asymmetry is unintentional. |
+| **Swagger UI is unauthenticated.** | Deliberate here — a reviewer can open the deployed URL and try the API. Gate it behind a profile for anything real. |
+| **`PUT /api/v1/prices` returns an untyped map**, the one response in the API without a named schema. | A consumer cannot generate a typed client for it. |
+| **Nothing enforces that `docs/openapi/` is current.** `scripts/export-openapi.sh` is run by hand. | The committed spec exists to make API changes reviewable; a stale one quietly does the opposite. A CI step is the natural home. |
 
 ## Deliberately out of scope
 

@@ -107,8 +107,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "422":
-          description: "Not enough valuation points to compute a statistic, or a position\
-            \ held on a day with no known price."
+          description: "Not enough valuation points to compute a statistic, a position\
+            \ held on a day with no known price, or a ledger too large to read in\
+            \ one request."
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "502":
+          description: "transaction-service rejected this service's request — a misconfigured\
+            \ base URL, a parameter it no longer accepts, or missing credentials.\
+            \ A fault in the integration, not in the request you made. Retrying will\
+            \ not help."
           content:
             application/problem+json:
               schema:

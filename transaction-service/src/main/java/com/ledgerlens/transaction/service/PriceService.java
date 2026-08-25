@@ -5,6 +5,7 @@ import com.ledgerlens.transaction.domain.DailyPriceBatchWriter;
 import com.ledgerlens.transaction.domain.DailyPriceRepository;
 import java.time.LocalDate;
 import java.util.Collection;
+import java.util.Locale;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -34,7 +35,7 @@ public class PriceService {
 
     public List<DailyPrice> find(Collection<String> symbols, LocalDate from, LocalDate to) {
         Set<String> normalised = symbols.stream()
-                .map(s -> s.trim().toUpperCase())
+                .map(s -> s.trim().toUpperCase(Locale.ROOT))
                 .filter(s -> !s.isEmpty())
                 .collect(Collectors.toSet());
         if (normalised.isEmpty()) {

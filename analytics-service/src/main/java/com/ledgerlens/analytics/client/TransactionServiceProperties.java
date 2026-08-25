@@ -18,6 +18,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param maxAttempts    total attempts, including the first; 1 disables retrying
  * @param staleTolerance how old a cached result may be before it stops being served
  *                       during an outage
+ * @param pageSize       transactions per request when reading a ledger. Clamped to the
+ *                       500 transaction-service will serve; configurable mainly so tests
+ *                       can force paging without fabricating five hundred rows.
  */
 @ConfigurationProperties(prefix = "ledgerlens.transaction-service")
 public record TransactionServiceProperties(
@@ -25,12 +28,14 @@ public record TransactionServiceProperties(
         Duration connectTimeout,
         Duration readTimeout,
         int maxAttempts,
-        Duration staleTolerance) {
+        Duration staleTolerance,
+        int pageSize) {
 
     public TransactionServiceProperties {
         connectTimeout = connectTimeout == null ? Duration.ofSeconds(2) : connectTimeout;
         readTimeout = readTimeout == null ? Duration.ofSeconds(5) : readTimeout;
         maxAttempts = maxAttempts <= 0 ? 2 : maxAttempts;
         staleTolerance = staleTolerance == null ? Duration.ofMinutes(15) : staleTolerance;
+        pageSize = pageSize <= 0 ? 500 : Math.min(pageSize, 500);
     }
 }

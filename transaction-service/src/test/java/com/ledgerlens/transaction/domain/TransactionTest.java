@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Locale;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -127,6 +128,29 @@ class TransactionTest {
                     null, "EUR", EXECUTED))
                     .isInstanceOf(InvalidTransactionException.class)
                     .hasMessageContaining("fee cannot be negative");
+        }
+    }
+
+    /**
+     * Runs under a Turkish locale on purpose. There, the default
+     * {@code toUpperCase()} turns "iwda" into "İWDA" with a dotted capital I,
+     * and the symbol silently stops matching anything stored earlier. The JVM
+     * takes its default locale from the environment, so a container image is
+     * free to change this out from under the code.
+     */
+    @Test
+    void normalisationDoesNotDependOnThePlatformLocale() {
+        Locale original = Locale.getDefault();
+        try {
+            Locale.setDefault(Locale.forLanguageTag("tr"));
+
+            Transaction t = Transaction.of(PORTFOLIO, TransactionType.BUY, "iwda",
+                    new BigDecimal("1"), new BigDecimal("100"), null, null, "eur", EXECUTED);
+
+            assertThat(t.getSymbol()).isEqualTo("IWDA");
+            assertThat(t.getCurrency()).isEqualTo("EUR");
+        } finally {
+            Locale.setDefault(original);
         }
     }
 

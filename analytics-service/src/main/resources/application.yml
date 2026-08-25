@@ -23,6 +23,10 @@ ledgerlens:
     # How old a cached result may be and still be served during an outage.
     # Past this, an error is more honest than a stale number.
     stale-tolerance: 15m
+    # Transactions per request when reading a ledger, capped at what
+    # transaction-service will serve. The client pages until the ledger is
+    # exhausted rather than using whatever fits in one response.
+    page-size: 500
 
 management:
   endpoints:

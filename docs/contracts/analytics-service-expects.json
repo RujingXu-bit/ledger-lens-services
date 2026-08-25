@@ -22,7 +22,7 @@
       "why": "the transactions are the facts every derived figure is built from",
       "path": "/api/v1/transactions",
       "method": "get",
-      "requiredQueryParameters": ["portfolioId", "size"],
+      "requiredQueryParameters": ["portfolioId", "page", "size"],
       "responseStatus": "200",
       "requiredFields": {
         "type": "string",

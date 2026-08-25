@@ -11,6 +11,7 @@ import jakarta.persistence.Table;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
 import org.hibernate.annotations.CreationTimestamp;
@@ -169,12 +170,16 @@ public class Transaction {
         Transaction t = new Transaction();
         t.portfolioId = portfolioId;
         t.type = type;
-        t.symbol = symbol == null ? null : symbol.toUpperCase();
+        // Locale.ROOT, not the platform default. In a Turkish locale "iwda"
+        // upper-cases to "İWDA" with a dotted capital I, and the symbol stops
+        // matching anything. The JVM's default locale comes from the
+        // environment, which a container image is free to change under you.
+        t.symbol = symbol == null ? null : symbol.toUpperCase(Locale.ROOT);
         t.quantity = quantity == null ? null : quantity.setScale(QUANTITY_SCALE, ROUNDING);
         t.pricePerUnit = pricePerUnit == null ? null : pricePerUnit.setScale(QUANTITY_SCALE, ROUNDING);
         t.fee = feeOrZero.setScale(CASH_SCALE, ROUNDING);
         t.cashAmount = cashAmount;
-        t.currency = currency.toUpperCase();
+        t.currency = currency.toUpperCase(Locale.ROOT);
         t.executedAt = executedAt;
         return t;
     }

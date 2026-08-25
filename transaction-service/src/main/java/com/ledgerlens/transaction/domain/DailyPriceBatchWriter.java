@@ -8,6 +8,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -52,10 +53,10 @@ public class DailyPriceBatchWriter {
         OffsetDateTime now = OffsetDateTime.ofInstant(Instant.now(), ZoneOffset.UTC);
         // batchUpdate returns one int[] per batch, hence the array of arrays.
         int[][] affected = jdbcTemplate.batchUpdate(UPSERT, prices, prices.size(), (ps, price) -> {
-            ps.setString(1, price.symbol().toUpperCase());
+            ps.setString(1, price.symbol().toUpperCase(Locale.ROOT));
             ps.setObject(2, price.priceDate(), Types.DATE);
             ps.setBigDecimal(3, price.closePrice());
-            ps.setString(4, price.currency().toUpperCase());
+            ps.setString(4, price.currency().toUpperCase(Locale.ROOT));
             ps.setObject(5, now, Types.TIMESTAMP_WITH_TIMEZONE);
         });
         return Arrays.stream(affected).mapToInt(batch -> batch.length).sum();
