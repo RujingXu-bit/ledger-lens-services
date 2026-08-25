@@ -7,7 +7,13 @@
 # runs in production: a build toolchain on a running container is attack surface
 # that can never be used for anything good. Multi-stage means it is discarded.
 # ---------------------------------------------------------------------------
-FROM eclipse-temurin:21-jdk-alpine AS build
+# --platform=$BUILDPLATFORM pins the build stage to the machine doing the
+# building, while the runtime stage below is built for the target architecture.
+# This is safe precisely because the output is a jar: Java bytecode is
+# architecture-independent, so an arm64 laptop can produce an image that runs on
+# amd64 in Azure without emulating a whole Maven build under QEMU. It would not
+# be safe for a dependency shipping native code; there is none here.
+FROM --platform=$BUILDPLATFORM eclipse-temurin:21-jdk-alpine AS build
 
 WORKDIR /build
 
