@@ -1,0 +1,18 @@
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.classpath
+.project
+.settings/
+
+.DS_Store
+*.log
+
+# Never commit real secrets; Azure values arrive as environment variables.
+.env
+*.local.yml

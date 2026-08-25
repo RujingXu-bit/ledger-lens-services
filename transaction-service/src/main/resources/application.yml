@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: transaction-service
+
+  # No hard-coded production values. Spring Boot maps SPRING_DATASOURCE_URL,
+  # SPRING_DATASOURCE_USERNAME and SPRING_DATASOURCE_PASSWORD onto these keys
+  # automatically, which is how Container Apps and Kubernetes will inject them
+  # in week 2. What is written here is only the local docker-compose default.
+  datasource:
+    url: jdbc:postgresql://localhost:5433/ledgerlens
+    username: ledgerlens
+    password: ledgerlens
+
+  jpa:
+    # Schema is owned by Flyway migrations from day 3, never by Hibernate.
+    hibernate:
+      ddl-auto: none
+    # Off by default in production code: open-session-in-view keeps a database
+    # connection held for the whole request and hides lazy-loading bugs.
+    open-in-view: false
+
+server:
+  port: 8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      # Splits /actuator/health into /health/liveness and /health/readiness.
+      # Kubernetes probes point at those two on day 12.
+      probes:
+        enabled: true
+      show-details: when-authorized

@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+      The aggregator / parent POM.
+
+      It inherits from spring-boot-starter-parent, which gives every module:
+        - a curated dependency-management section (no version numbers on Spring
+          dependencies anywhere else in this repo - Spring Boot has already
+          decided which Jackson works with which Hibernate, and so on)
+        - sensible plugin configuration (compiler release, resource filtering,
+          repackaging into an executable jar)
+
+      It declares no code of its own: packaging is `pom`.
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.16</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.ledgerlens</groupId>
+    <artifactId>ledger-lens-services</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <name>ledger-lens-services</name>
+    <description>Portfolio analytics rebuilt as Spring Boot microservices</description>
+
+    <!--
+      Each module is an independently buildable, independently deployable
+      Spring Boot application. They share this POM for build settings only -
+      deliberately no shared code module. See README for the reasoning.
+    -->
+    <modules>
+        <module>transaction-service</module>
+        <module>analytics-service</module>
+    </modules>
+
+    <properties>
+        <java.version>21</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencies>
+        <!-- Every service exposes health/info endpoints. Kubernetes liveness and
+             readiness probes point at these in week 2, so they are not optional. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

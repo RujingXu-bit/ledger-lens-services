@@ -1,0 +1,24 @@
+spring:
+  application:
+    name: analytics-service
+
+server:
+  port: 8082
+
+# Where transaction-service lives. localhost for now; a compose service name on
+# day 8, a Container Apps internal FQDN on day 10, a Kubernetes Service name on
+# day 12. Only this one value changes across all four environments.
+ledgerlens:
+  transaction-service:
+    base-url: http://localhost:8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
